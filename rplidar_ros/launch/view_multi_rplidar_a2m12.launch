@@ -5,11 +5,11 @@
  -->
 <launch>
   <include ns="rplidar0" file="$(find rplidar_ros)/launch/rplidar_a2m12.launch">
-        <arg name="serial_port" value="/dev/rplidar_Front"/>
+        <arg name="serial_port" value="/dev/rplidar_front"/>
         <arg name="frame_id" value="laser0"/>
   </include>
   <include ns="rplidar1" file="$(find rplidar_ros)/launch/rplidar_a2m12.launch">
-        <arg name="serial_port" value="/dev/rplidar_Rear"/>
+        <arg name="serial_port" value="/dev/rplidar_rear"/>
         <arg name="frame_id" value="laser1"/>
   </include>
   

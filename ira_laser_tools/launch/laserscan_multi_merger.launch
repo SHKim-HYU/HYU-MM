@@ -1,6 +1,7 @@
 <!-- DESCRITPION -->
 
 <launch>
+	<include file="$(find rplidar_ros)/launch/multi_rplidar_a2m12.launch"/>
 	<node pkg="ira_laser_tools" name="laserscan_multi_merger" type="laserscan_multi_merger" output="screen">
 	<param name="destination_frame" value="base_link"/>
 	<param name="cloud_destination_topic" value="/merged_cloud"/>
