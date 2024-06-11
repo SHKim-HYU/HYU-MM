@@ -1,0 +1,22 @@
+<!--
+  Used for visualising rplidar in action.  
+  
+  It requires rplidar.launch.
+ -->
+<launch>
+  <include ns="rplidar0" file="$(find rplidar_ros)/launch/rplidar_a2m8.launch">
+        <arg name="serial_port" value="/dev/rplidar0"/>
+        <arg name="frame_id" value="laser0"/>
+  </include>
+  <include ns="rplidar1" file="$(find rplidar_ros)/launch/rplidar_a2m8.launch">
+        <arg name="serial_port" value="/dev/rplidar1"/>
+        <arg name="frame_id" value="laser1"/>
+  </include>
+  
+  <param name="robot_description" textfile="$(find rplidar_ros)/robots/rplidar_urdf.urdf" />
+  <param name="use_gui" value="true"/>
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+  <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" />
+
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find rplidar_ros)/rviz/rplidar_two.rviz" />
+</launch>

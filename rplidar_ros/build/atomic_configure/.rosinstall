@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/robot/ros_ws/catkin_ws/src/HYU-MM/rplidar_ros/build/devel/setup.sh
