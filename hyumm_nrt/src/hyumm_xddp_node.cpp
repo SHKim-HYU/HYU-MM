@@ -76,7 +76,7 @@ int main(int argc, char** argv)
 
     std::thread odom_thread(readOdomData, std::ref(pubOdometry));
 
-    ros::Rate loop_rate(10);
+    ros::Rate loop_rate(1000);
 
 
     ros::spin();
