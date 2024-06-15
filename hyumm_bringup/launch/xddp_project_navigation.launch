@@ -1,0 +1,6 @@
+<launch>
+    <!-- Run teleop node -->
+	<node pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py" name="teleop" output="screen"/>
+
+    <node pkg="hyumm_nrt" type="hyumm_xddp_node" name="hyumm_xddp_node" output="screen"/>
+</launch>
