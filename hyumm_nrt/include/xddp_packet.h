@@ -20,7 +20,7 @@
 #define XDDP_PORT_ACT 12		// State publish for actual mobile manipulator
 #define XDDP_PORT_ADM 13		// State publish for admittance model
 
-#define MM_DOF_NUM 9
+#define MM_DOF_NUM 6
 #define BUTTON_NUM 4
 
 namespace packet{
