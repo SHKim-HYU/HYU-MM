@@ -29,10 +29,6 @@
 #define XDDP_PORT_QT_TX0 22			//
 #define XDDP_PORT_QT_TX1 23			// 
 
-<<<<<<< HEAD
-#define MM_DOF_NUM 6
-=======
->>>>>>> update
 #define BUTTON_NUM 4
 
 namespace packet{
