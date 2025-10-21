@@ -6,6 +6,47 @@ static void fail(const char *reason)
 	exit(EXIT_FAILURE);
 }
 
+<<<<<<< HEAD
+=======
+void readOdomData(ros::Publisher& pubOdometry)
+{
+	if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_STATE_INFO_1) < 0)
+		fail("asprintf");
+
+	tx_odom_sockfd = open(devname, O_RDONLY);
+	free(devname);
+	if (tx_odom_sockfd < 0)
+		fail("open");
+
+    while (ros::ok())
+    {
+        /* Get the next message from realtime_thread. */
+		ret = read(tx_odom_sockfd, (void *)tx_odom_nrt, BUFLEN_ODOM); 
+
+        if(ret>0)
+        {
+            tx_odom_msg.header.stamp = ros::Time::now();
+            tx_odom_msg.header.frame_id = "odom";
+            tx_odom_msg.pose.pose.position.x = tx_odom_nrt->pose.position.x;
+            tx_odom_msg.pose.pose.position.y = tx_odom_nrt->pose.position.y;
+            tx_odom_msg.pose.pose.position.z = tx_odom_nrt->pose.position.z;
+            tx_odom_msg.pose.pose.orientation.x = tx_odom_nrt->pose.orientation.x;
+            tx_odom_msg.pose.pose.orientation.y = tx_odom_nrt->pose.orientation.y;
+            tx_odom_msg.pose.pose.orientation.z = tx_odom_nrt->pose.orientation.z;
+            tx_odom_msg.pose.pose.orientation.w = tx_odom_nrt->pose.orientation.w;
+            tx_odom_msg.twist.twist.linear.x = tx_odom_nrt->twist.linear.x;
+            tx_odom_msg.twist.twist.linear.y = tx_odom_nrt->twist.linear.y;
+            tx_odom_msg.twist.twist.linear.z = tx_odom_nrt->twist.linear.z;
+            tx_odom_msg.twist.twist.angular.x = tx_odom_nrt->twist.angular.x;
+            tx_odom_msg.twist.twist.angular.y = tx_odom_nrt->twist.angular.y;
+            tx_odom_msg.twist.twist.angular.z = tx_odom_nrt->twist.angular.z;
+
+            pubOdometry.publish(tx_odom_msg);
+        }
+    }
+    close(tx_odom_sockfd);
+}
+>>>>>>> update
 
 void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
     rx_cmd_vel_nrt->linear.x = msg->linear.x;
@@ -49,14 +90,27 @@ void joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
 
 int main(int argc, char** argv) 
 {
+<<<<<<< HEAD
     if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_ODOM) < 0)
+=======
+    
+    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
+		fail("asprintf");
+    rx_cmd_vel_sockfd = open(devname, O_RDWR);
+	free(devname);
+	if (rx_cmd_vel_sockfd < 0)
+		fail("open");
+    
+    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_2) < 0)
+>>>>>>> update
 		fail("asprintf");
     rx_odom_sockfd = open(devname, O_RDWR);
 	free(devname);
 	if (rx_odom_sockfd < 0)
 		fail("open");
     
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_JOY) < 0)
+    
+    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_3) < 0)
 		fail("asprintf");
     rx_joy_sockfd = open(devname, O_RDWR);
 	free(devname);

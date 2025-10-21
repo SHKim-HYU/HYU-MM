@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "array": "cpp",
+        "bit": "cpp",
+        "chrono": "cpp",
+        "memory": "cpp",
+        "type_traits": "cpp",
+        "limits": "cpp",
+        "new": "cpp",
+        "ratio": "cpp",
+        "thread": "cpp",
+        "tuple": "cpp",
+        "utility": "cpp"
+    }
+}

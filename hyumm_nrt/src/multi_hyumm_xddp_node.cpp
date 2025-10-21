@@ -8,7 +8,7 @@ static void fail(const char *reason)
 
 void readOdomData(ros::Publisher& pubOdometry)
 {
-	if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_ODOM) < 0)
+	if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_STATE_INFO_1) < 0)
 		fail("asprintf");
 
 	odom_sockfd = open(devname, O_RDONLY);
@@ -58,7 +58,7 @@ void twistCallback(const geometry_msgs::Twist::ConstPtr& msg) {
 
 int main(int argc, char** argv) 
 {
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_VEL) < 0)
+    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
 		fail("asprintf");
 
 	cmd_vel_sockfd = open(devname, O_RDWR);
