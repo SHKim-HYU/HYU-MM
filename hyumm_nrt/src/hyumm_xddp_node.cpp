@@ -6,8 +6,6 @@ static void fail(const char *reason)
 	exit(EXIT_FAILURE);
 }
 
-<<<<<<< HEAD
-=======
 void readOdomData(ros::Publisher& pubOdometry)
 {
 	if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_STATE_INFO_1) < 0)
@@ -46,7 +44,6 @@ void readOdomData(ros::Publisher& pubOdometry)
     }
     close(tx_odom_sockfd);
 }
->>>>>>> update
 
 void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
     rx_cmd_vel_nrt->linear.x = msg->linear.x;
@@ -90,9 +87,6 @@ void joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
 
 int main(int argc, char** argv) 
 {
-<<<<<<< HEAD
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_ODOM) < 0)
-=======
     
     if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
 		fail("asprintf");
@@ -102,7 +96,6 @@ int main(int argc, char** argv)
 		fail("open");
     
     if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_2) < 0)
->>>>>>> update
 		fail("asprintf");
     rx_odom_sockfd = open(devname, O_RDWR);
 	free(devname);
