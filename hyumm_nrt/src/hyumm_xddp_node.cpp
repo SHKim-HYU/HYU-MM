@@ -88,44 +88,46 @@ void joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
 int main(int argc, char** argv) 
 {
     
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
-		fail("asprintf");
-    rx_cmd_vel_sockfd = open(devname, O_RDWR);
-	free(devname);
-	if (rx_cmd_vel_sockfd < 0)
-		fail("open");
+    // if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
+	// 	fail("asprintf");
+    // rx_cmd_vel_sockfd = open(devname, O_RDWR);
+	// free(devname);
+	// if (rx_cmd_vel_sockfd < 0)
+	// 	fail("open");
     
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_2) < 0)
-		fail("asprintf");
-    rx_odom_sockfd = open(devname, O_RDWR);
-	free(devname);
-	if (rx_odom_sockfd < 0)
-		fail("open");
+    // if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_2) < 0)
+	// 	fail("asprintf");
+    // rx_odom_sockfd = open(devname, O_RDWR);
+	// free(devname);
+	// if (rx_odom_sockfd < 0)
+	// 	fail("open");
     
     
-    if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_3) < 0)
-		fail("asprintf");
-    rx_joy_sockfd = open(devname, O_RDWR);
-	free(devname);
-	if (rx_joy_sockfd < 0)
-		fail("open");
+    // if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_3) < 0)
+	// 	fail("asprintf");
+    // rx_joy_sockfd = open(devname, O_RDWR);
+	// free(devname);
+	// if (rx_joy_sockfd < 0)
+	// 	fail("open");
 
     ros::init(argc, argv, "xddp_nrt");
     ros::NodeHandle nh_;
 
     ros::Publisher pubOdometry = nh_.advertise<nav_msgs::Odometry>("/odom", 10);
-    ros::Subscriber subCmdVel = nh_.subscribe("/cmd_vel",1,cmdvelCallback);    
-    ros::Subscriber subTwist = nh_.subscribe("/vive/right_controller/twist",1,twistCallback); 
-    ros::Subscriber subPose = nh_.subscribe("/vive/right_controller/pose",1,poseCallback);        
-    ros::Subscriber subJoy = nh_.subscribe("/vive/right_controller/joy",1,joyCallback);    
+    // ros::Subscriber subCmdVel = nh_.subscribe("/cmd_vel",1,cmdvelCallback);    
+    // ros::Subscriber subTwist = nh_.subscribe("/vive/right_controller/twist",1,twistCallback); 
+    // ros::Subscriber subPose = nh_.subscribe("/vive/right_controller/pose",1,poseCallback);        
+    // ros::Subscriber subJoy = nh_.subscribe("/vive/right_controller/joy",1,joyCallback);    
     
-    
+    std::thread odom_thread(readOdomData, std::ref(pubOdometry));
+
     ros::Rate loop_rate(100);
 
 
     ros::spin();
     loop_rate.sleep();
    
+    odom_thread.join();
    
     return 0;
 }
