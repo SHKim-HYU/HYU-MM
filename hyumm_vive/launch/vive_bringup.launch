@@ -1,0 +1,29 @@
+<launch>
+  <!-- One-shot bring-up of the whole vive stack:
+         backend (vive_libsurvive_ros)  -> raw device pose/twist/TF
+         vive_world anchor (hyumm_vive) -> defines vive_world from the fixed tracker
+         mobile_base (hyumm_vive)       -> base pose TF for RViz
+         rviz (optional)                -> visualise vive_world + all frames
+       Start everything together so there is no manual sequencing delay.
+       Used by hyumm_bringup/scan_xddp_project.launch. -->
+
+  <arg name="backend"    default="true"/>
+  <arg name="rviz"       default="true"/>
+  <arg name="backend_config" default="$(find vive_libsurvive_ros)/config/vive_compat.yaml"/>
+
+  <!-- 1) libsurvive backend (Steam-free device driver) -->
+  <include if="$(arg backend)"
+           file="$(find vive_libsurvive_ros)/launch/vive_compat.launch">
+    <arg name="config" value="$(arg backend_config)"/>
+  </include>
+
+  <!-- 2) vive_world anchor -->
+  <include file="$(find hyumm_vive)/launch/vive_world_anchor.launch"/>
+
+  <!-- 3) mobile_base pose -> TF -->
+  <include file="$(find hyumm_vive)/launch/mobile_base.launch"/>
+
+  <!-- 4) RViz -->
+  <node if="$(arg rviz)" pkg="rviz" type="rviz" name="vive_rviz"
+        args="-d $(find hyumm_vive)/rviz/hyumm_vive.rviz" output="screen"/>
+</launch>

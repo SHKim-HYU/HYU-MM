@@ -16,6 +16,11 @@
   <build_export_depend>std_msgs</build_export_depend>
   <exec_depend>roscpp</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <!-- launch includes the vive stack -->
+  <exec_depend>hyumm_vive</exec_depend>
+  <exec_depend>vive_libsurvive_ros</exec_depend>
+  <exec_depend>hyumm_nrt</exec_depend>
+  <exec_depend>teleop_twist_keyboard</exec_depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

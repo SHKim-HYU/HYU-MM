@@ -1,0 +1,8 @@
+<launch>
+  <!-- Compute mobile_base pose in vive_world and publish it as TF + PoseStamped. -->
+  <arg name="config" default="$(find hyumm_vive)/config/mobile_base.yaml"/>
+
+  <node pkg="hyumm_vive" type="mobile_base_node" name="mobile_base" output="screen">
+    <rosparam command="load" file="$(arg config)"/>
+  </node>
+</launch>

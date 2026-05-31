@@ -1,5 +1,21 @@
 <launch>
-    <!-- Run teleop node -->
-	<node pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py" name="teleop" output="screen"/>
+    <!-- One-shot bring-up: vive stack + XDDP base sender + teleop.
+         Everything starts together (no manual sequencing between launches).
+         Toggles:
+           vive:=false     skip the whole vive stack (backend+anchor+base+rviz)
+           backend:=false  vive stack but assume the libsurvive backend runs elsewhere
+           rviz:=false     no RViz -->
+    <arg name="vive"    default="true"/>
+    <arg name="backend" default="true"/>
+    <arg name="rviz"    default="true"/>
+
+    <!-- libsurvive backend + vive_world anchor + mobile_base + rviz -->
+    <include if="$(arg vive)" file="$(find hyumm_vive)/launch/vive_bringup.launch">
+        <arg name="backend" value="$(arg backend)"/>
+        <arg name="rviz"    value="$(arg rviz)"/>
+    </include>
+
+    <!-- Teleop + XDDP odom/twist sender to the xenomai RT controller (unchanged) -->
+    <node pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py" name="teleop" output="screen"/>
     <node pkg="hyumm_nrt" type="hyumm_scan_xddp_node" name="hyumm_scan_xddp_node" output="screen"/>
 </launch>

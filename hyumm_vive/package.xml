@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>hyumm_vive</name>
+  <version>0.0.1</version>
+  <description>
+    Application-layer vive_world frame for HYU-MM. Defines vive_world from the
+    fixed reference tracker (anchor), republishes vive poses in vive_world, and
+    broadcasts the vive_world -> libsurvive_world TF. Consumes the raw device
+    topics from the vive_libsurvive_ros backend.
+  </description>
+  <maintainer email="fndlrkdl94@gmail.com">robot</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>tf</depend>
+  <depend>geometry_msgs</depend>
+</package>
