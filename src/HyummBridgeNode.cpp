@@ -35,6 +35,7 @@
 #include "hyumm_ocs2/HyummInterface.h"
 #include "hyumm_ocs2/definitions.h"
 #include "hyumm_ocs2/package_path.h"
+#include "hyumm_bridge/CollisionMonitor.h"
 #include "xddp_ros.h"   // XddpLink (self-healing /dev/rtpN) + packet:: schema (from hyumm_nrt)
 
 namespace {
@@ -72,6 +73,17 @@ class HyummBridgeNode : public rclcpp::Node {
     max_base_vel_ = declare_parameter<double>("max_base_vel", 1.0);   // m/s, rad/s
     max_arm_vel_ = declare_parameter<double>("max_arm_vel", 2.0);     // rad/s
 
+    // --- Phase-clock collision-stop ---
+    // When enabled, a binary self-collision monitor (built in main) gates the
+    // emitted desired velocity by a rate in [0,1]: rate ramps to 0 on a current/
+    // imminent collision (freeze) and back to 1 when clear (resume). The desired
+    // position is integrated from the rate-scaled velocity so position and
+    // velocity stay consistent through the stop. Default off (safety).
+    collision_stop_ = declare_parameter<bool>("collision_stop", false);
+    collision_lookahead_ = declare_parameter<int>("collision_lookahead", 10);
+    rate_ramp_up_ = declare_parameter<double>("rate_ramp_up", 0.02);     // per cycle (resume slowly)
+    rate_ramp_down_ = declare_parameter<double>("rate_ramp_down", 0.20); // per cycle (stop fast)
+
     arm_q_.assign(arm_joint_names_.size(), 0.0);
 
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -101,6 +113,17 @@ class HyummBridgeNode : public rclcpp::Node {
   double loopRateHz() const { return loop_rate_hz_; }
   bool haveBase() const { return have_base_; }
   bool haveArm() const { return have_arm_; }
+  bool collisionStopEnabled() const { return collision_stop_; }
+  int collisionLookahead() const { return collision_lookahead_; }
+  double rate() const { return rate_; }
+
+  // Phase clock: ramp the rate toward 0 on hazard (stop), toward 1 when clear
+  // (resume), with asymmetric ramps (stop fast, resume slow = hysteresis).
+  void updatePhaseClock(bool hazard) {
+    if (!collision_stop_) { rate_ = 1.0; return; }
+    if (hazard) rate_ = std::max(0.0, rate_ - rate_ramp_down_);
+    else        rate_ = std::min(1.0, rate_ + rate_ramp_up_);
+  }
 
   // Overwrite state[0..8] with the latest measurements (leaves arm/base untouched
   // if not yet received, so the seed initial state is used until data arrives).
@@ -121,19 +144,26 @@ class HyummBridgeNode : public rclcpp::Node {
   // send_desired=false).
   void sendDesired(const ocs2::vector_t& xd, const ocs2::vector_t& ud, double dt) {
     if (!send_desired_) return;
+    if (!int_init_) {
+      for (int i = 0; i < MM_DOF; ++i) des_pos_int_[i] = xd(i);
+      int_init_ = true;
+    }
+    // Under collision-stop the position MUST track the rate-scaled velocity
+    // (else a frozen velocity with a still-advancing setpoint would fight).
+    const bool use_int = collision_stop_ || desired_position_source_ == "integrate";
+
     packet::RobotInfo<MM_DOF> pkt{};   // {} zero-inits all sub-structs
     for (int i = 0; i < MM_DOF; ++i) {
       const bool isBase = (i < static_cast<int>(hyumm_ocs2::BASE_INPUT_DIM));
       double vel = ud(i);
       const double lim = isBase ? max_base_vel_ : max_arm_vel_;
       vel = std::max(-lim, std::min(lim, vel));   // safety clamp
-      if (isBase && !command_base_) { vel = 0.0; }
+      if (isBase && !command_base_) vel = 0.0;
+      vel *= rate_;                               // phase-clock gate (1.0 unless stopping)
 
-      double pos = xd(i);
-      if (desired_position_source_ == "integrate") {
-        des_pos_int_[i] += vel * dt;
-        pos = des_pos_int_[i];
-      }
+      double pos;
+      if (use_int) { des_pos_int_[i] += vel * dt; pos = des_pos_int_[i]; }
+      else { pos = xd(i); }
       pkt.des.jointState.position[i] = pos;
       pkt.des.jointState.velocity[i] = vel;
       pkt.des.jointState.accel[i] = 0.0;   // OCS2 outputs velocity; no accel reference
@@ -191,6 +221,13 @@ class HyummBridgeNode : public rclcpp::Node {
   bool command_base_ = true;
   double max_base_vel_ = 1.0, max_arm_vel_ = 2.0;
 
+  // phase-clock collision-stop
+  bool collision_stop_ = false;
+  int collision_lookahead_ = 10;
+  double rate_ramp_up_ = 0.02, rate_ramp_down_ = 0.20;
+  double rate_ = 1.0;       // phase-clock rate in [0,1]
+  bool int_init_ = false;   // desired-position integrator seeded?
+
   // measured state cache
   double base_x_ = 0.0, base_y_ = 0.0, base_yaw_ = 0.0;
   std::vector<double> arm_q_;
@@ -236,6 +273,22 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(node->get_logger(), "Resetting MPC (waiting for hyumm_mpc_node)...");
   mrt.resetMpcNode(initTarget);
 
+  // Binary self-collision monitor for the phase-clock (built from task.info
+  // collisionLinkPairs; independent of the SQP self-collision constraint).
+  std::unique_ptr<hyumm_bridge::CollisionMonitor> monitor;
+  if (node->collisionStopEnabled()) {
+    monitor = hyumm_bridge::CollisionMonitor::loadFromTaskFile(
+        node->taskFile(), interface.getPinocchioInterface());
+    if (monitor) {
+      RCLCPP_INFO(node->get_logger(),
+                  "collision-stop ENABLED: %zu pairs, min distance %.3f m",
+                  monitor->numCollisionPairs(), monitor->getMinimumDistance());
+    } else {
+      RCLCPP_WARN(node->get_logger(),
+                  "collision_stop set but no collisionLinkPairs in task.info -- disabled");
+    }
+  }
+
   const double dt = 1.0 / node->loopRateHz();
   rclcpp::Rate rate(node->loopRateHz());
   double t = 0.0;
@@ -266,14 +319,32 @@ int main(int argc, char** argv) {
       ocs2::vector_t xd, ud;
       size_t mode = 0;
       mrt.evaluatePolicy(t, obs.state, xd, ud, mode);
+
+      // Phase-clock collision-stop: hazard = current OR imminent (planned) collision.
+      bool hazard = false;
+      double min_dist = 0.0;
+      if (monitor) {
+        min_dist = monitor->minDistance(obs.state);
+        hazard = min_dist < monitor->getMinimumDistance();
+        if (!hazard) {  // predictive lookahead over the planned state trajectory
+          const auto& sol = mrt.getPolicy();
+          const int N = std::min<int>(node->collisionLookahead(),
+                                      static_cast<int>(sol.stateTrajectory_.size()));
+          for (int k = 0; k < N; ++k) {
+            if (monitor->isInCollision(sol.stateTrajectory_[k])) { hazard = true; break; }
+          }
+        }
+      }
+      node->updatePhaseClock(hazard);
+
       node->sendDesired(xd, ud, dt);
       obs.input = ud;   // report the applied input back to MPC next cycle
-      // periodic heartbeat: measured base + desired base/arm velocity
+      // periodic heartbeat: measured base + desired base/arm velocity + phase clock
       RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000,
-          "meas base[%.3f %.3f %.3f] meas?=%d/%d  des vbase[%.2f %.2f %.2f] dq0=%.2f",
+          "meas base[%.3f %.3f %.3f] meas?=%d/%d  des dq0=%.2f  rate=%.2f%s minDist=%.3f",
           obs.state(0), obs.state(1), obs.state(2),
-          node->haveBase(), node->haveArm(),
-          ud(0), ud(1), ud(2), ud(3));
+          node->haveBase(), node->haveArm(), ud(3),
+          node->rate(), hazard ? " HAZARD" : "", min_dist);
     } else if (!warned_wait) {
       RCLCPP_WARN(node->get_logger(),
                   "waiting for first MPC policy (is hyumm_mpc_node running?)");

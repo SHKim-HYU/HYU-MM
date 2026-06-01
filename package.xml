@@ -25,6 +25,9 @@
   <depend>ocs2_oc</depend>
   <depend>ocs2_ros_interfaces</depend>
   <depend>ocs2_msgs</depend>
+  <depend>ocs2_pinocchio_interface</depend>
+  <depend>ocs2_self_collision</depend>
+  <depend>pinocchio</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

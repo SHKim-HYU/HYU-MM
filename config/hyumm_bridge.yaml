@@ -25,3 +25,9 @@
     # safety clamps on emitted velocity command (per-DOF magnitude)
     max_base_vel: 1.0                # m/s, rad/s
     max_arm_vel: 2.0                 # rad/s
+
+    # --- phase-clock collision-stop (binary self-collision monitor) ---
+    collision_stop: false            # true: gate desired velocity by a [0,1] rate on (imminent) self-collision
+    collision_lookahead: 10          # planned-trajectory nodes scanned for imminent collision
+    rate_ramp_up: 0.02               # per-cycle resume ramp (slow)
+    rate_ramp_down: 0.20             # per-cycle stop ramp (fast)
