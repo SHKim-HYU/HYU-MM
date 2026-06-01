@@ -1,273 +1,211 @@
-#include <ros/ros.h>
-#include <string.h>
-#include <tf/transform_listener.h>
-#include <pcl_ros/transforms.h>
-#include <laser_geometry/laser_geometry.h>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/io/pcd_io.h>
-#include <sensor_msgs/PointCloud.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <sensor_msgs/point_cloud_conversion.h>
-#include "sensor_msgs/LaserScan.h"
-#include "pcl_ros/point_cloud.h"
-#include <Eigen/Dense>
-#include <dynamic_reconfigure/server.h>
-#include <ira_laser_tools/laserscan_multi_mergerConfig.h>
+// laserscan_multi_merger -- ROS2 port (dependency-free).
+//
+// Merges several sensor_msgs/LaserScan topics into one PointCloud2 + one
+// re-binned LaserScan, all expressed in a common destination frame.
+//
+// The Noetic node leaned on laser_geometry + PCL + pcl_ros + dynamic_reconfigure.
+// Those are not installed in this ROS2 Galactic environment, so the projection
+// (polar -> cartesian), the TF transform to the destination frame, the point
+// merge and the re-bin are reimplemented directly on top of tf2 + the
+// sensor_msgs PointCloud2 iterators. dynamic_reconfigure is replaced by plain
+// ROS2 parameters (live-updatable via the on-set-parameters callback). The
+// configured laserscan_topics are subscribed directly by name (ROS2 allows
+// subscribing before the publisher exists, so no master polling is needed).
 
-using namespace std;
-using namespace pcl;
-using namespace laserscan_multi_merger;
+#include <cmath>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 
-class LaserscanMerger
-{
-	public:
-		LaserscanMerger();
-		void scanCallback(const sensor_msgs::LaserScan::ConstPtr &scan, std::string topic);
-		void pointcloud_to_laserscan(Eigen::MatrixXf points, pcl::PCLPointCloud2 *merged_cloud);
-		void reconfigureCallback(laserscan_multi_mergerConfig &config, uint32_t level);
+#include <rclcpp/rclcpp.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Vector3.h>
+#include <tf2/time.h>
 
-	private:
-		ros::NodeHandle node_;
-		laser_geometry::LaserProjection projector_;
-		tf::TransformListener tfListener_;
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 
-		ros::Publisher point_cloud_publisher_;
-		ros::Publisher laser_scan_publisher_;
-		vector<ros::Subscriber> scan_subscribers;
-		vector<bool> clouds_modified;
+class LaserscanMerger : public rclcpp::Node {
+ public:
+  LaserscanMerger() : rclcpp::Node("laserscan_multi_merger") {
+    destination_frame_ = declare_parameter<std::string>("destination_frame", "cart_frame");
+    cloud_destination_topic_ = declare_parameter<std::string>("cloud_destination_topic", "/merged_cloud");
+    scan_destination_topic_ = declare_parameter<std::string>("scan_destination_topic", "/scan_multi");
+    laserscan_topics_ = declare_parameter<std::string>("laserscan_topics", "");
+    angle_min_ = declare_parameter<double>("angle_min", -2.36);
+    angle_max_ = declare_parameter<double>("angle_max", 2.36);
+    angle_increment_ = declare_parameter<double>("angle_increment", 0.0058);
+    time_increment_ = declare_parameter<double>("time_increment", 0.0);
+    scan_time_ = declare_parameter<double>("scan_time", 0.0333333);
+    range_min_ = declare_parameter<double>("range_min", 0.45);
+    range_max_ = declare_parameter<double>("range_max", 25.0);
 
-		vector<pcl::PCLPointCloud2> clouds;
-		vector<string> input_topics;
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-		void laserscan_topic_parser();
+    cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(cloud_destination_topic_, 1);
+    scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>(scan_destination_topic_, 1);
 
-		double angle_min;
-		double angle_max;
-		double angle_increment;
-		double time_increment;
-		double scan_time;
-		double range_min;
-		double range_max;
+    // Parse the space-separated topic list and subscribe to each by name.
+    std::istringstream iss(laserscan_topics_);
+    std::string topic;
+    while (iss >> topic) input_topics_.push_back(topic);
 
-		string destination_frame;
-		string cloud_destination_topic;
-		string scan_destination_topic;
-		string laserscan_topics;
+    if (input_topics_.empty()) {
+      RCLCPP_WARN(get_logger(), "laserscan_topics is empty: nothing to merge");
+    }
+    points_.resize(input_topics_.size());
+    modified_.assign(input_topics_.size(), false);
+    for (size_t i = 0; i < input_topics_.size(); ++i) {
+      RCLCPP_INFO(get_logger(), "subscribing to %s", input_topics_[i].c_str());
+      subs_.push_back(create_subscription<sensor_msgs::msg::LaserScan>(
+          input_topics_[i], rclcpp::SensorDataQoS(),
+          [this, i](sensor_msgs::msg::LaserScan::ConstSharedPtr s) { scanCallback(s, i); }));
+    }
+
+    param_cb_ = add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& params) {
+          for (const auto& p : params) {
+            const auto& n = p.get_name();
+            if (n == "angle_min") angle_min_ = p.as_double();
+            else if (n == "angle_max") angle_max_ = p.as_double();
+            else if (n == "angle_increment") angle_increment_ = p.as_double();
+            else if (n == "time_increment") time_increment_ = p.as_double();
+            else if (n == "scan_time") scan_time_ = p.as_double();
+            else if (n == "range_min") range_min_ = p.as_double();
+            else if (n == "range_max") range_max_ = p.as_double();
+          }
+          rcl_interfaces::msg::SetParametersResult r;
+          r.successful = true;
+          return r;
+        });
+
+    RCLCPP_INFO(get_logger(),
+        "laserscan_multi_merger: %zu input(s) -> %s (PointCloud2) + %s (LaserScan) in frame '%s'",
+        input_topics_.size(), cloud_destination_topic_.c_str(),
+        scan_destination_topic_.c_str(), destination_frame_.c_str());
+  }
+
+ private:
+  struct Pt { float x, y, z; };
+
+  void scanCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr scan, size_t idx) {
+    // TF: destination_frame <- scan frame. Sensor->base mounts are rigid
+    // (static), so use the latest available transform (robust to scan-stamp vs
+    // TF-time skew and to scans published without a stamp).
+    tf2::Transform T;
+    try {
+      const auto ts = tf_buffer_->lookupTransform(
+          destination_frame_, scan->header.frame_id,
+          tf2::TimePointZero, tf2::durationFromSec(1.0));
+      T = tf2::Transform(
+          tf2::Quaternion(ts.transform.rotation.x, ts.transform.rotation.y,
+                          ts.transform.rotation.z, ts.transform.rotation.w),
+          tf2::Vector3(ts.transform.translation.x, ts.transform.translation.y,
+                       ts.transform.translation.z));
+    } catch (const tf2::TransformException& e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "TF %s <- %s failed: %s", destination_frame_.c_str(),
+                           scan->header.frame_id.c_str(), e.what());
+      return;  // TF not ready; drop this scan
+    }
+
+    // Project polar -> cartesian (laser frame) -> destination frame.
+    std::vector<Pt>& pts = points_[idx];
+    pts.clear();
+    pts.reserve(scan->ranges.size());
+    for (size_t j = 0; j < scan->ranges.size(); ++j) {
+      const float r = scan->ranges[j];
+      if (!std::isfinite(r) || r < scan->range_min || r > scan->range_max) continue;
+      const double a = scan->angle_min + j * scan->angle_increment;
+      const tf2::Vector3 p_dest = T * tf2::Vector3(r * std::cos(a), r * std::sin(a), 0.0);
+      pts.push_back({static_cast<float>(p_dest.x()),
+                     static_cast<float>(p_dest.y()),
+                     static_cast<float>(p_dest.z())});
+    }
+    modified_[idx] = true;
+
+    // Publish once every subscribed scan has contributed at least once.
+    for (bool m : modified_) if (!m) return;
+
+    std::vector<Pt> merged;
+    size_t total = 0;
+    for (const auto& v : points_) total += v.size();
+    merged.reserve(total);
+    for (const auto& v : points_) merged.insert(merged.end(), v.begin(), v.end());
+    for (size_t i = 0; i < modified_.size(); ++i) modified_[i] = false;
+
+    publishCloud(merged, scan->header.stamp);
+    publishScan(merged, scan->header.stamp);
+  }
+
+  void publishCloud(const std::vector<Pt>& pts, const rclcpp::Time& stamp) {
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = destination_frame_;
+    sensor_msgs::PointCloud2Modifier mod(cloud);
+    mod.setPointCloud2FieldsByString(1, "xyz");
+    mod.resize(pts.size());
+    sensor_msgs::PointCloud2Iterator<float> ix(cloud, "x"), iy(cloud, "y"), iz(cloud, "z");
+    for (const auto& p : pts) {
+      *ix = p.x; *iy = p.y; *iz = p.z;
+      ++ix; ++iy; ++iz;
+    }
+    cloud_pub_->publish(cloud);
+  }
+
+  void publishScan(const std::vector<Pt>& pts, const rclcpp::Time& stamp) {
+    sensor_msgs::msg::LaserScan out;
+    out.header.stamp = stamp;
+    out.header.frame_id = destination_frame_;
+    out.angle_min = angle_min_;
+    out.angle_max = angle_max_;
+    out.angle_increment = angle_increment_;
+    out.time_increment = time_increment_;
+    out.scan_time = scan_time_;
+    out.range_min = range_min_;
+    out.range_max = range_max_;
+
+    const uint32_t n = std::ceil((out.angle_max - out.angle_min) / out.angle_increment);
+    out.ranges.assign(n, out.range_max + 1.0f);
+    const double range_min_sq = out.range_min * out.range_min;
+
+    for (const auto& p : pts) {
+      if (std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z)) continue;
+      const double range_sq = p.x * p.x + p.y * p.y;
+      if (range_sq < range_min_sq) continue;
+      const double angle = std::atan2(p.y, p.x);
+      if (angle < out.angle_min || angle > out.angle_max) continue;
+      const int index = (angle - out.angle_min) / out.angle_increment;
+      if (index < 0 || index >= static_cast<int>(n)) continue;
+      const float rng = std::sqrt(range_sq);
+      if (rng < out.ranges[index]) out.ranges[index] = rng;
+    }
+    scan_pub_->publish(out);
+  }
+
+  std::string destination_frame_, cloud_destination_topic_, scan_destination_topic_, laserscan_topics_;
+  double angle_min_, angle_max_, angle_increment_, time_increment_, scan_time_, range_min_, range_max_;
+
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_pub_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr> subs_;
+  std::vector<std::string> input_topics_;
+  std::vector<std::vector<Pt>> points_;
+  std::vector<bool> modified_;
+  OnSetParametersCallbackHandle::SharedPtr param_cb_;
 };
 
-void LaserscanMerger::reconfigureCallback(laserscan_multi_mergerConfig &config, uint32_t level)
-{
-	this->angle_min = config.angle_min;
-	this->angle_max = config.angle_max;
-	this->angle_increment = config.angle_increment;
-	this->time_increment = config.time_increment;
-	this->scan_time = config.scan_time;
-	this->range_min = config.range_min;
-	this->range_max = config.range_max;
-}
-
-void LaserscanMerger::laserscan_topic_parser()
-{
-	// LaserScan topics to subscribe
-	ros::master::V_TopicInfo topics;
-
-	istringstream iss(laserscan_topics);
-	set<string> tokens;
-	copy(istream_iterator<string>(iss), istream_iterator<string>(), inserter<set<string>>(tokens, tokens.begin()));
-	vector<string> tmp_input_topics;
-
-	while (!tokens.empty())
-	{
-		ROS_INFO("Waiting for topics ...");
-		ros::master::getTopics(topics);
-		sleep(1);
-
-		for (int i = 0; i < topics.size(); i++)
-		{
-			if (topics[i].datatype == "sensor_msgs/LaserScan" && tokens.erase(topics[i].name) > 0)
-			{
-				tmp_input_topics.push_back(topics[i].name);
-			}
-		}
-	}
-
-	sort(tmp_input_topics.begin(), tmp_input_topics.end());
-	std::vector<string>::iterator last = std::unique(tmp_input_topics.begin(), tmp_input_topics.end());
-	tmp_input_topics.erase(last, tmp_input_topics.end());
-
-	// Do not re-subscribe if the topics are the same
-	if ((tmp_input_topics.size() != input_topics.size()) || !equal(tmp_input_topics.begin(), tmp_input_topics.end(), input_topics.begin()))
-	{
-
-		// Unsubscribe from previous topics
-		for (int i = 0; i < scan_subscribers.size(); i++)
-			scan_subscribers[i].shutdown();
-
-		input_topics = tmp_input_topics;
-
-		if (input_topics.size() > 0)
-		{
-			scan_subscribers.resize(input_topics.size());
-			clouds_modified.resize(input_topics.size());
-			clouds.resize(input_topics.size());
-			ROS_INFO("Subscribing to topics\t%ld", scan_subscribers.size());
-			for (int i = 0; i < input_topics.size(); ++i)
-			{
-				scan_subscribers[i] = node_.subscribe<sensor_msgs::LaserScan>(input_topics[i].c_str(), 1, boost::bind(&LaserscanMerger::scanCallback, this, _1, input_topics[i]));
-				clouds_modified[i] = false;
-				ROS_INFO("input_topics");
-				cout << input_topics[i] << " ";
-			}
-		}
-		else
-			ROS_INFO("Not subscribed to any topic.");
-	}
-}
-
-LaserscanMerger::LaserscanMerger()
-{
-	ros::NodeHandle nh("~");
-
-	nh.param<std::string>("destination_frame", destination_frame, "cart_frame");
-	nh.param<std::string>("cloud_destination_topic", cloud_destination_topic, "/merged_cloud");
-	nh.param<std::string>("scan_destination_topic", scan_destination_topic, "/scan_multi");
-	nh.param<std::string>("laserscan_topics", laserscan_topics, "");
-	nh.param("angle_min", angle_min, -2.36);
-	nh.param("angle_max", angle_max, 2.36);
-	nh.param("angle_increment", angle_increment, 0.0058);
-	nh.param("scan_time", scan_time, 0.0333333);
-	nh.param("range_min", range_min, 0.45);
-	nh.param("range_max", range_max, 25.0);
-
-	this->laserscan_topic_parser();
-
-	point_cloud_publisher_ = node_.advertise<sensor_msgs::PointCloud2>(cloud_destination_topic.c_str(), 1, false);
-	laser_scan_publisher_ = node_.advertise<sensor_msgs::LaserScan>(scan_destination_topic.c_str(), 1, false);
-}
-
-void LaserscanMerger::scanCallback(const sensor_msgs::LaserScan::ConstPtr &scan, std::string topic)
-{
-	sensor_msgs::PointCloud tmpCloud1, tmpCloud2;
-	sensor_msgs::PointCloud2 tmpCloud3;
-
-	// refer to http://wiki.ros.org/tf/Tutorials/tf%20and%20Time%20%28C%2B%2B%29
-	try
-	{
-		// Verify that TF knows how to transform from the received scan to the destination scan frame
-		tfListener_.waitForTransform(scan->header.frame_id.c_str(), destination_frame.c_str(), scan->header.stamp, ros::Duration(1));
-		projector_.transformLaserScanToPointCloud(scan->header.frame_id, *scan, tmpCloud1, tfListener_, laser_geometry::channel_option::Distance);
-		tfListener_.transformPointCloud(destination_frame.c_str(), tmpCloud1, tmpCloud2);
-	}
-	catch (tf::TransformException ex)
-	{
-		return;
-	}
-
-	for (int i = 0; i < input_topics.size(); i++)
-	{
-		if (topic.compare(input_topics[i]) == 0)
-		{
-			sensor_msgs::convertPointCloudToPointCloud2(tmpCloud2, tmpCloud3);
-			pcl_conversions::toPCL(tmpCloud3, clouds[i]);
-			clouds_modified[i] = true;
-		}
-	}
-
-	// Count how many scans we have
-	int totalClouds = 0;
-	for (int i = 0; i < clouds_modified.size(); i++)
-		if (clouds_modified[i])
-			totalClouds++;
-
-	// Go ahead only if all subscribed scans have arrived
-	if (totalClouds == clouds_modified.size())
-	{
-		pcl::PCLPointCloud2 merged_cloud = clouds[0];
-		clouds_modified[0] = false;
-
-		for (int i = 1; i < clouds_modified.size(); i++)
-		{
-			#if PCL_VERSION_COMPARE(>=, 1, 10, 0)
-				pcl::concatenate(merged_cloud, clouds[i], merged_cloud);
-			#else
-				pcl::concatenatePointCloud(merged_cloud, clouds[i], merged_cloud);
-			#endif
-				clouds_modified[i] = false;
-		}
-
-		point_cloud_publisher_.publish(merged_cloud);
-
-		Eigen::MatrixXf points;
-		getPointCloudAsEigen(merged_cloud, points);
-
-		pointcloud_to_laserscan(points, &merged_cloud);
-	}
-}
-
-void LaserscanMerger::pointcloud_to_laserscan(Eigen::MatrixXf points, pcl::PCLPointCloud2 *merged_cloud)
-{
-	sensor_msgs::LaserScanPtr output(new sensor_msgs::LaserScan());
-	output->header = pcl_conversions::fromPCL(merged_cloud->header);
-	output->angle_min = this->angle_min;
-	output->angle_max = this->angle_max;
-	output->angle_increment = this->angle_increment;
-	output->time_increment = this->time_increment;
-	output->scan_time = this->scan_time;
-	output->range_min = this->range_min;
-	output->range_max = this->range_max;
-
-	uint32_t ranges_size = std::ceil((output->angle_max - output->angle_min) / output->angle_increment);
-	output->ranges.assign(ranges_size, output->range_max + 1.0);
-
-	for (int i = 0; i < points.cols(); i++)
-	{
-		const float &x = points(0, i);
-		const float &y = points(1, i);
-		const float &z = points(2, i);
-
-		if (std::isnan(x) || std::isnan(y) || std::isnan(z))
-		{
-			ROS_DEBUG("rejected for nan in point(%f, %f, %f)\n", x, y, z);
-			continue;
-		}
-
-		double range_sq = pow(y, 2) + pow(x, 2);
-		double range_min_sq_ = output->range_min * output->range_min;
-		if (range_sq < range_min_sq_)
-		{
-			ROS_DEBUG("rejected for range %f below minimum value %f. Point: (%f, %f, %f)", range_sq, range_min_sq_, x, y, z);
-			continue;
-		}
-
-		double angle = atan2(y, x);
-		if (angle < output->angle_min || angle > output->angle_max)
-		{
-			ROS_DEBUG("rejected for angle %f not in range (%f, %f)\n", angle, output->angle_min, output->angle_max);
-			continue;
-		}
-		int index = (angle - output->angle_min) / output->angle_increment;
-
-		if (output->ranges[index] * output->ranges[index] > range_sq)
-			output->ranges[index] = sqrt(range_sq);
-	}
-
-	laser_scan_publisher_.publish(output);
-}
-
-int main(int argc, char **argv)
-{
-	ros::init(argc, argv, "laser_multi_merger");
-
-	LaserscanMerger _laser_merger;
-
-	dynamic_reconfigure::Server<laserscan_multi_mergerConfig> server;
-	dynamic_reconfigure::Server<laserscan_multi_mergerConfig>::CallbackType f;
-
-	f = boost::bind(&LaserscanMerger::reconfigureCallback, &_laser_merger, _1, _2);
-	server.setCallback(f);
-
-	ros::spin();
-
-	return 0;
+int main(int argc, char** argv) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<LaserscanMerger>());
+  rclcpp::shutdown();
+  return 0;
 }
