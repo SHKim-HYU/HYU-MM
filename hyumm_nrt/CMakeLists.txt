@@ -7,6 +7,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   sensor_msgs
   tf
+  hyumm_vive          # header-only ViveLocalizer library
 )
 
 catkin_package(
@@ -22,6 +23,8 @@ include_directories(
 add_executable(hyumm_xddp_node src/hyumm_xddp_node.cpp)
 add_executable(multi_hyumm_xddp_node src/multi_hyumm_xddp_node.cpp)
 add_executable(hyumm_scan_xddp_node src/hyumm_scan_xddp_node.cpp)
+add_executable(hyumm_vive_xddp_node src/hyumm_vive_xddp_node.cpp)
 target_link_libraries(hyumm_xddp_node ${catkin_LIBRARIES})
 target_link_libraries(multi_hyumm_xddp_node ${catkin_LIBRARIES})
 target_link_libraries(hyumm_scan_xddp_node ${catkin_LIBRARIES})
+target_link_libraries(hyumm_vive_xddp_node ${catkin_LIBRARIES})

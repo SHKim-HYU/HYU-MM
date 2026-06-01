@@ -1,0 +1,28 @@
+<launch>
+  <!-- Standalone RViz view of vive_world + actual(vive) / nominal(green) robots.
+       Run this on a machine that HAS a display (the headless robot can't open a
+       Qt/xcb window). It only starts RViz; the robot_description params, the two
+       robot_state_publishers and all TF come from whatever bringup is already
+       running on the master.
+
+       Typical split (robot is headless, laptop has the screen):
+         # on the robot (no GUI):
+         roslaunch hyumm_bringup scan_xddp_project.launch rviz:=false
+         # on the laptop (same LAN, robot is the master):
+         export ROS_MASTER_URI=http://192.168.10.101:11311
+         roslaunch hyumm_bringup rviz.launch
+
+       All on one machine with a monitor? Just use scan_xddp_project.launch
+       (its rviz:=true default already bundles this).
+
+       robot:=true  -> also start the actual+nominal robot_state_publishers HERE
+                       (use only when nothing else is publishing them, e.g. RViz +
+                       models without the XDDP pipeline). Needs hyumm_description on
+                       THIS machine's package path so package:// meshes resolve. -->
+  <arg name="robot" default="false"/>
+
+  <include if="$(arg robot)" file="$(find hyumm_description)/launch/robot_display.launch"/>
+
+  <node pkg="rviz" type="rviz" name="vive_rviz"
+        args="-d $(find hyumm_vive)/rviz/hyumm_vive.rviz" output="screen"/>
+</launch>

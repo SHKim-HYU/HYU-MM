@@ -1,0 +1,26 @@
+<launch>
+  <!-- actual + nominal robot models in RViz. Joint angles come from the nrt node
+       (hyumm_vive_xddp) over XDDP from the RT controller:
+         /joint_states          = RT act.q  arm -> rsp_actual  (replaces jsp)
+         /nominal/joint_states  = RT nom.q  arm -> rsp_nominal
+       Base TF: vive_world->base_link (actual, from vive) and
+                vive_world->nominal/base_link (nominal, from RT) are broadcast by
+       the nrt node. The NOMINAL URDF has nominal/-prefixed LINK names
+       (prepare_urdf.py) because Noetic robot_state_publisher ignores frame_prefix
+       / tf_prefix — prefixing in the URDF makes it publish nominal/* frames. -->
+  <arg name="nominal" default="true"/>
+  <arg name="urdf"    default="$(find hyumm_description)/urdf/hyumm_scan.urdf"/>
+
+  <!-- ACTUAL robot: base from vive (nrt TF), arm from RT act via /joint_states -->
+  <param name="robot_description" textfile="$(arg urdf)"/>
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="rsp_actual"/>
+
+  <!-- NOMINAL ghost robot: green + nominal/-prefixed links, arm from RT nom -->
+  <group if="$(arg nominal)" ns="nominal">
+    <param name="robot_description"
+           command="$(find hyumm_bringup)/scripts/prepare_urdf.py $(arg urdf)"/>
+    <node pkg="robot_state_publisher" type="robot_state_publisher" name="rsp_nominal">
+      <remap from="joint_states" to="/nominal/joint_states"/>
+    </node>
+  </group>
+</launch>

@@ -3,10 +3,10 @@
   <name>hyumm_vive</name>
   <version>0.0.1</version>
   <description>
-    Application-layer vive_world frame for HYU-MM. Defines vive_world from the
-    fixed reference tracker (anchor), republishes vive poses in vive_world, and
-    broadcasts the vive_world -> libsurvive_world TF. Consumes the raw device
-    topics from the vive_libsurvive_ros backend.
+    Header-only vive localization library (ViveLocalizer). Anchors the libsurvive
+    tracker poses onto vive_world (fixed reference tracker) and computes the
+    mobile-base center pose + twist. Consumed in-process by the hyumm_nrt node;
+    no ROS nodes or topic exchange of its own.
   </description>
   <maintainer email="fndlrkdl94@gmail.com">robot</maintainer>
   <license>MIT</license>

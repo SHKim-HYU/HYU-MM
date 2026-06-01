@@ -1,21 +1,47 @@
 <launch>
-    <!-- One-shot bring-up: vive stack + XDDP base sender + teleop.
-         Everything starts together (no manual sequencing between launches).
+    <!-- One-shot low-level bring-up:
+           backend  : vive_libsurvive_ros (Steam-free libsurvive driver -> /vive/* topics)
+           nrt node : hyumm_vive_xddp_node reads /vive/* directly, localizes
+                      (vive_world anchor + mobile_base), broadcasts TF, and is the
+                      sole XDDP bridge to the RT side (odom + forwarded cmd_vel)
+           rviz     : visualises vive_world + all frames
+           robot    : actual + nominal robot models in RViz (hyumm_description)
          Toggles:
-           vive:=false     skip the whole vive stack (backend+anchor+base+rviz)
-           backend:=false  vive stack but assume the libsurvive backend runs elsewhere
-           rviz:=false     no RViz -->
-    <arg name="vive"    default="true"/>
+           backend:=false   assume the libsurvive backend runs elsewhere
+           xddp:=false      TF/RViz only (no RT side needed)
+           robot:=false     no robot models (frames-only RViz)
+           rviz:=true       bundle RViz here (default OFF: robot is headless,
+                            run RViz on a screen-equipped machine via rviz.launch)
+           teleop:=true     ALSO bundle teleop_twist_keyboard in THIS terminal.
+                            Default false: teleop puts the tty in raw mode (no
+                            \n->\r\n), which staircases every other node's log.
+                            Run it in its OWN terminal instead:
+                              rosrun teleop_twist_keyboard teleop_twist_keyboard.py -->
     <arg name="backend" default="true"/>
-    <arg name="rviz"    default="true"/>
+    <arg name="xddp"    default="true"/>
+    <arg name="robot"   default="true"/>
+    <arg name="rviz"    default="false"/>   <!-- headless robot; run RViz via rviz.launch elsewhere -->
+    <arg name="teleop"  default="false"/>   <!-- keep logs clean; run teleop separately -->
 
-    <!-- libsurvive backend + vive_world anchor + mobile_base + rviz -->
-    <include if="$(arg vive)" file="$(find hyumm_vive)/launch/vive_bringup.launch">
-        <arg name="backend" value="$(arg backend)"/>
-        <arg name="rviz"    value="$(arg rviz)"/>
+    <!-- 1) libsurvive backend -->
+    <include if="$(arg backend)" file="$(find vive_libsurvive_ros)/launch/vive_compat.launch"/>
+
+    <!-- 2) nrt low-level node: localize -> TF + XDDP(odom + cmd_vel + rt nominal status) -->
+    <include file="$(find hyumm_nrt)/launch/vive_xddp.launch">
+        <arg name="send_xddp"   value="$(arg xddp)"/>
+        <arg name="recv_status" value="$(arg robot)"/>   <!-- nominal status drives the green robot -->
     </include>
 
-    <!-- Teleop + XDDP odom/twist sender to the xenomai RT controller (unchanged) -->
-    <node pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py" name="teleop" output="screen"/>
-    <node pkg="hyumm_nrt" type="hyumm_scan_xddp_node" name="hyumm_scan_xddp_node" output="screen"/>
+    <!-- 3) actual (vive) + nominal (rt, green) robot models -->
+    <include if="$(arg robot)" file="$(find hyumm_description)/launch/robot_display.launch"/>
+
+    <!-- 4) teleop -> /cmd_vel (forwarded to RT by the nrt node).
+         Off by default: run it in its own terminal so its raw-mode tty doesn't
+         staircase the other nodes' logs. Set teleop:=true to bundle it here. -->
+    <node if="$(arg teleop)" pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py"
+          name="teleop" output="screen"/>
+
+    <!-- 5) RViz -->
+    <node if="$(arg rviz)" pkg="rviz" type="rviz" name="vive_rviz"
+          args="-d $(find hyumm_vive)/rviz/hyumm_vive.rviz" output="screen"/>
 </launch>

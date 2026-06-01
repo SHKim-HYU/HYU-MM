@@ -22,13 +22,24 @@ static const double REF_Z = 0.8;
 // Fixed tracker orientation: identity (0,0,0,1)
 
 // Tracker offset from mobile base center (in base frame)
-static const double OFFSET_X = -0.395;
-static const double OFFSET_Y = -0.235;
+static const double OFFSET_REAR_X = -0.395;
+static const double OFFSET_REAR_Y = -0.235;
+static const double OFFSET_FRONT_X = 0.420;   // TODO: measure actual value
+static const double OFFSET_FRONT_Y = 0.235;  // TODO: measure actual value
+
+// Angle of rear-to-front line in base frame (for heading correction when both active)
+static const double TRACKER_LINE_ANGLE = atan2(OFFSET_FRONT_Y - OFFSET_REAR_Y,
+                                                OFFSET_FRONT_X - OFFSET_REAR_X);
+
+// --- Occlusion timeout (seconds) ---
+static const double OCCLUSION_TIMEOUT = 0.1;
 
 // --- Tracker data ---
-static geometry_msgs::PoseStamped fixed_pose, mobile_pose;
-static geometry_msgs::TwistStamped mobile_twist;
-static bool fixed_received = false, mobile_received = false;
+static geometry_msgs::PoseStamped fixed_pose, mobile_rear_pose, mobile_front_pose;
+static geometry_msgs::TwistStamped mobile_rear_twist, mobile_front_twist;
+static bool fixed_received = false;
+static ros::Time mobile_rear_last_time, mobile_front_last_time;
+static bool mobile_rear_ever_received = false, mobile_front_ever_received = false;
 
 // --- Multi-turn yaw tracking ---
 static double accumulated_yaw = 0.0;
@@ -53,13 +64,24 @@ void fixedPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
 	fixed_received = true;
 }
 
-void mobilePoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
-	mobile_pose = *msg;
-	mobile_received = true;
+void mobileRearPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+	mobile_rear_pose = *msg;
+	mobile_rear_last_time = ros::Time::now();
+	mobile_rear_ever_received = true;
 }
 
-void mobileTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
-	mobile_twist = *msg;
+void mobileRearTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
+	mobile_rear_twist = *msg;
+}
+
+void mobileFrontPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+	mobile_front_pose = *msg;
+	mobile_front_last_time = ros::Time::now();
+	mobile_front_ever_received = true;
+}
+
+void mobileFrontTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
+	mobile_front_twist = *msg;
 }
 
 void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
@@ -74,35 +96,99 @@ void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
 }
 
 void computeAndSend() {
-	if(!fixed_received || !mobile_received) return;
+	if(!fixed_received) return;
 
-	// --- Build tf::Transforms ---
-	tf::Transform T_fixed_vive  = poseToTransform(fixed_pose.pose);
-	tf::Transform T_mobile_vive = poseToTransform(mobile_pose.pose);
+	// --- Check tracker occlusion ---
+	ros::Time now = ros::Time::now();
+	bool rear_active = mobile_rear_ever_received &&
+	                   (now - mobile_rear_last_time).toSec() < OCCLUSION_TIMEOUT;
+	bool front_active = mobile_front_ever_received &&
+	                    (now - mobile_front_last_time).toSec() < OCCLUSION_TIMEOUT;
 
+	if(!rear_active && !front_active) return;
+
+	// --- Calibration transform ---
+	tf::Transform T_fixed_vive = poseToTransform(fixed_pose.pose);
 	tf::Transform T_fixed_ref(tf::Quaternion(0, 0, 0, 1),
 	                           tf::Vector3(REF_X, REF_Y, REF_Z));
-
-	tf::Transform T_offset(tf::Quaternion(0, 0, 0, 1),
-	                        tf::Vector3(OFFSET_X, OFFSET_Y, 0));
-
-	// T_calib = T_fixed_ref * inv(T_fixed_vive)
 	tf::Transform T_calib = T_fixed_ref * T_fixed_vive.inverse();
 
-	// T_mobile_ref = T_calib * T_mobile_vive
-	tf::Transform T_mobile_ref = T_calib * T_mobile_vive;
+	double x, y, raw_yaw;
+	tf::Transform T_active_ref;       // tracker-in-ref for twist computation
+	double active_offset_x, active_offset_y;
+	const geometry_msgs::TwistStamped* active_twist;
 
-	// T_base = T_mobile_ref * inv(T_offset)
-	tf::Transform T_base = T_mobile_ref * T_offset.inverse();
+	if(rear_active && front_active) {
+		// ====== BOTH TRACKERS: fused mode ======
+		tf::Transform T_rear_ref  = T_calib * poseToTransform(mobile_rear_pose.pose);
+		tf::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
 
-	// --- Extract x, y ---
-	double x = T_base.getOrigin().x();
-	double y = T_base.getOrigin().y();
+		double rear_x  = T_rear_ref.getOrigin().x();
+		double rear_y  = T_rear_ref.getOrigin().y();
+		double front_x = T_front_ref.getOrigin().x();
+		double front_y = T_front_ref.getOrigin().y();
+
+		// Heading from rear-to-front vector, corrected for tracker line angle in base frame
+		raw_yaw = atan2(front_y - rear_y, front_x - rear_x) - TRACKER_LINE_ANGLE;
+		raw_yaw = normalizeAngle(raw_yaw);
+
+		double cos_yaw = cos(raw_yaw);
+		double sin_yaw = sin(raw_yaw);
+
+		// Base center estimated from each tracker (subtract rotated offset)
+		double base_x_rear  = rear_x  - (cos_yaw * OFFSET_REAR_X  - sin_yaw * OFFSET_REAR_Y);
+		double base_y_rear  = rear_y  - (sin_yaw * OFFSET_REAR_X  + cos_yaw * OFFSET_REAR_Y);
+		double base_x_front = front_x - (cos_yaw * OFFSET_FRONT_X - sin_yaw * OFFSET_FRONT_Y);
+		double base_y_front = front_y - (sin_yaw * OFFSET_FRONT_X + cos_yaw * OFFSET_FRONT_Y);
+
+		// Average both estimates
+		x = (base_x_rear + base_x_front) / 2.0;
+		y = (base_y_rear + base_y_front) / 2.0;
+
+		// Use rear tracker for twist computation
+		T_active_ref = T_rear_ref;
+		active_offset_x = OFFSET_REAR_X;
+		active_offset_y = OFFSET_REAR_Y;
+		active_twist = &mobile_rear_twist;
+
+	} else if(rear_active) {
+		// ====== REAR ONLY (front occluded) ======
+		tf::Transform T_rear_ref = T_calib * poseToTransform(mobile_rear_pose.pose);
+		tf::Transform T_rear_offset(tf::Quaternion(0, 0, 0, 1),
+		                             tf::Vector3(OFFSET_REAR_X, OFFSET_REAR_Y, 0));
+		tf::Transform T_base = T_rear_ref * T_rear_offset.inverse();
+
+		x = T_base.getOrigin().x();
+		y = T_base.getOrigin().y();
+
+		double roll, pitch;
+		T_base.getBasis().getRPY(roll, pitch, raw_yaw);
+
+		T_active_ref = T_rear_ref;
+		active_offset_x = OFFSET_REAR_X;
+		active_offset_y = OFFSET_REAR_Y;
+		active_twist = &mobile_rear_twist;
+
+	} else {
+		// ====== FRONT ONLY (rear occluded) ======
+		tf::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
+		tf::Transform T_front_offset(tf::Quaternion(0, 0, 0, 1),
+		                              tf::Vector3(OFFSET_FRONT_X, OFFSET_FRONT_Y, 0));
+		tf::Transform T_base = T_front_ref * T_front_offset.inverse();
+
+		x = T_base.getOrigin().x();
+		y = T_base.getOrigin().y();
+
+		double roll, pitch;
+		T_base.getBasis().getRPY(roll, pitch, raw_yaw);
+
+		T_active_ref = T_front_ref;
+		active_offset_x = OFFSET_FRONT_X;
+		active_offset_y = OFFSET_FRONT_Y;
+		active_twist = &mobile_front_twist;
+	}
 
 	// --- Multi-turn yaw unwrapping ---
-	double roll, pitch, raw_yaw;
-	T_base.getBasis().getRPY(roll, pitch, raw_yaw);
-
 	if(!yaw_initialized) {
 		accumulated_yaw = raw_yaw;
 		prev_raw_yaw = raw_yaw;
@@ -124,23 +210,25 @@ void computeAndSend() {
 	tx_msg.pose.orientation.z = sin(accumulated_yaw / 2.0);
 	tx_msg.pose.orientation.w = cos(accumulated_yaw / 2.0);
 
-	// --- Twist: transform tracker velocity to base center velocity in ref frame ---
-	tf::Vector3 v_lin_body(mobile_twist.twist.linear.x,
-	                       mobile_twist.twist.linear.y,
-	                       mobile_twist.twist.linear.z);
-	tf::Vector3 v_ang_body(mobile_twist.twist.angular.x,
-	                       mobile_twist.twist.angular.y,
-	                       mobile_twist.twist.angular.z);
+	// --- Twist: transform active tracker velocity to base center velocity in ref frame ---
+	tf::Vector3 v_lin_body(active_twist->twist.linear.x,
+	                       active_twist->twist.linear.y,
+	                       active_twist->twist.linear.z);
+	tf::Vector3 v_ang_body(active_twist->twist.angular.x,
+	                       active_twist->twist.angular.y,
+	                       active_twist->twist.angular.z);
 
 	// Rotate twist from tracker body frame to reference frame
-	tf::Matrix3x3 R_mobile_ref = T_mobile_ref.getBasis();
-	tf::Vector3 v_tracker_ref = R_mobile_ref * v_lin_body;
-	tf::Vector3 w_ref         = R_mobile_ref * v_ang_body;
+	tf::Matrix3x3 R_ref = T_active_ref.getBasis();
+	tf::Vector3 v_tracker_ref = R_ref * v_lin_body;
+	tf::Vector3 w_ref         = R_ref * v_ang_body;
 
-	// Offset correction: v_base = v_tracker - ω × r_offset_ref
-	// r_offset is vector from base center to tracker in reference frame
-	tf::Matrix3x3 R_base = T_base.getBasis();
-	tf::Vector3 r_offset_ref = R_base * tf::Vector3(OFFSET_X, OFFSET_Y, 0);
+	// Offset correction: v_base = v_tracker - w x r_offset_ref
+	double cos_yaw_cur = cos(raw_yaw);
+	double sin_yaw_cur = sin(raw_yaw);
+	tf::Vector3 r_offset_ref(cos_yaw_cur * active_offset_x - sin_yaw_cur * active_offset_y,
+	                          sin_yaw_cur * active_offset_x + cos_yaw_cur * active_offset_y,
+	                          0);
 	tf::Vector3 v_base_ref = v_tracker_ref - w_ref.cross(r_offset_ref);
 
 	tx_msg.twist.linear.x  = v_base_ref.x();
@@ -181,9 +269,18 @@ int main(int argc, char** argv)
 	ros::init(argc, argv, "hyumm_scan_xddp_node");
 	ros::NodeHandle nh;
 
-	ros::Subscriber sub_fixed_pose  = nh.subscribe("/vive/tracker_fixed/pose",  1, fixedPoseCallback);
-	ros::Subscriber sub_mobile_pose = nh.subscribe("/vive/tracker_mobile/pose", 1, mobilePoseCallback);
-	ros::Subscriber sub_mobile_twist = nh.subscribe("/vive/tracker_mobile/twist", 1, mobileTwistCallback);
+	// Fixed tracker
+	ros::Subscriber sub_fixed_pose = nh.subscribe("/vive/tracker_fixed/pose", 1, fixedPoseCallback);
+
+	// Rear tracker
+	ros::Subscriber sub_mobile_rear_pose  = nh.subscribe("/vive/tracker_mobile_rear/pose",  1, mobileRearPoseCallback);
+	ros::Subscriber sub_mobile_rear_twist = nh.subscribe("/vive/tracker_mobile_rear/twist", 1, mobileRearTwistCallback);
+
+	// Front tracker
+	ros::Subscriber sub_mobile_front_pose  = nh.subscribe("/vive/tracker_mobile_front/pose",  1, mobileFrontPoseCallback);
+	ros::Subscriber sub_mobile_front_twist = nh.subscribe("/vive/tracker_mobile_front/twist", 1, mobileFrontTwistCallback);
+
+	// cmd_vel
 	ros::Subscriber sub_cmd_vel = nh.subscribe("/cmd_vel", 1, cmdvelCallback);
 
 	ros::Rate rate(100);
