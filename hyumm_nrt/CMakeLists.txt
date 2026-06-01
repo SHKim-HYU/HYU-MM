@@ -61,4 +61,11 @@ install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Export the header-only XDDP transport (xddp_ros.h / xddp_packet.h) so other
+# packages (e.g. hyumm_bridge) can include the self-healing XddpLink + packet schema.
+install(DIRECTORY include/
+  DESTINATION include
+)
+ament_export_include_directories(include)
+
 ament_package()
