@@ -1,41 +1,41 @@
 # hyumm_vive_xddp_node: localize (vive_world anchor + mobile_base) + XDDP bridge.
+# ROS2 parameter file (wildcard node name so it applies regardless of remap).
+/**:
+  ros__parameters:
+    # --- frames / topics ---
+    input_ns: /vive                  # libsurvive backend topic namespace
+    reference: tracker_fixed         # fixed tracker defines vive_world (serial LHR-18744CF1)
+    rear: tracker_mobile_rear
+    front: tracker_mobile_front
+    world_frame: vive_world
+    source_frame: libsurvive_world   # backend frame (TF vive_world->source chains the trackers)
+    base_frame: base_link            # ACTUAL robot root (robot_state_publisher attaches here)
+    publish_tf: true
 
-# --- frames / topics ---
-input_ns: /vive                  # libsurvive backend topic namespace
-reference: tracker_fixed         # fixed tracker defines vive_world (serial LHR-18744CF1 in the backend)
-rear: tracker_mobile_rear
-front: tracker_mobile_front
-world_frame: vive_world
-source_frame: libsurvive_world   # backend frame (TF vive_world->source chains the trackers)
-base_frame: base_link            # ACTUAL robot root (robot_state_publisher attaches here)
-publish_tf: true
+    # --- vive_world anchor (fixed tracker's surveyed pose) ---
+    anchor_position: [1.5, 0.3, 0.9]
+    anchor_orientation: [0.0, 0.0, 0.0, 1.0]   # identity (4 elems quat) or 3 elems rpy
+    settle_samples: 30
+    warmup_samples: 0
 
-# --- vive_world anchor (fixed tracker's surveyed pose) ---
-anchor_position: [1.5, 0.3, 0.9]
-anchor_orientation: [0.0, 0.0, 0.0, 1.0]   # identity: fixed tracker axes = vive_world axes (or rpy 3 elems)
-settle_samples: 30
-warmup_samples: 0
+    # --- mobile base geometry (tracker offsets from base center, base frame, m) ---
+    offset_rear_x: -0.395
+    offset_rear_y: -0.235
+    offset_front_x: 0.420
+    offset_front_y: 0.235
+    occlusion_timeout: 0.1
 
-# --- mobile base geometry (tracker offsets from base center, base frame, meters) ---
-offset_rear_x: -0.395
-offset_rear_y: -0.235
-offset_front_x: 0.420
-offset_front_y: 0.235
-occlusion_timeout: 0.1
+    # --- XDDP to the xenomai RT controller (self-healing; either side may restart) ---
+    send_xddp: false        # full pipeline overrides to true; false = TF/RViz only
+    xddp_odom_port: 1       # XDDP_PORT_CMD_INFO_2 -> /dev/rtp1 (odom: base pose+twist)
+    xddp_cmdvel_port: 0     # XDDP_PORT_CMD_INFO_1 -> /dev/rtp0 (forwarded /cmd_vel)
+    watchdog_period: 0.5    # [s] RT-liveness poll of /proc/xenomai/sched/threads
+    rt_task_odom: rx_odom_task            # binds the odom port   (rtp1)
+    rt_task_cmdvel: rx_cmdvel_task        # binds the cmd_vel port (rtp0)
+    rt_task_status: tx_robot_state_task   # binds the status port (rtp10)
 
-# --- XDDP to the xenomai RT controller (self-healing links; either side may restart) ---
-send_xddp: false        # full pipeline overrides to true; false = TF/RViz only (safe without RT)
-xddp_odom_port: 1       # XDDP_PORT_CMD_INFO_2 -> /dev/rtp1 (odom: base pose+twist)
-xddp_cmdvel_port: 0     # XDDP_PORT_CMD_INFO_1 -> /dev/rtp0 (forwarded /cmd_vel)
-watchdog_period: 0.5    # [s] RT-liveness poll of /proc/xenomai/sched/threads
-# RT task names that BIND each port (must match rt_task_create in
-# RTECAT_MobileManipulator/src/xddp_bridge.cpp). A link opens its device only
-# while its task is alive, so RT and nrt can be (re)started in any order.
-rt_task_odom:   rx_odom_task     # binds the odom port   (rtp1)
-rt_task_cmdvel: rx_cmdvel_task   # binds the cmd_vel port (rtp0)
-rt_task_status: tx_robot_state_task   # binds the status port (rtp10), sends RobotInfo
-
-# --- rt->nrt NOMINAL base status (for the green "nominal" robot in RViz) ---
-recv_status: false              # full pipeline overrides to true
-xddp_status_port: 10            # XDDP_PORT_STATE_INFO_1 -> /dev/rtp10 (RT sends nominal base pose+twist)
-nominal_base_frame: nominal/base_link   # nominal robot root (frame_prefix nominal/)
+    # --- rt->nrt NOMINAL base status (green "nominal" robot in RViz) ---
+    recv_status: false              # full pipeline overrides to true
+    xddp_status_port: 10            # XDDP_PORT_STATE_INFO_1 -> /dev/rtp10 (RobotInfo)
+    nominal_base_frame: nominal/base_link   # nominal robot root (frame_prefix nominal/)
+    base_z: 0.0

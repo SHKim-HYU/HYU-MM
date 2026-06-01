@@ -1,7 +1,7 @@
 #ifndef XDDP_ROS_H
 #define XDDP_ROS_H
 
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstdio>
@@ -20,16 +20,20 @@
 // link is UP only while its owning RT task is present in
 // /proc/xenomai/sched/threads: poll() opens the device when the task appears
 // and closes it when the task vanishes (releasing the port for RT to re-bind).
-// This is the ROS1 port of the HDR-DUET DOWN/UP watchdog — it NEVER calls
+// This is the ROS2 port of the HDR-DUET DOWN/UP watchdog — it NEVER calls
 // exit(): a missing RT side simply leaves the link DOWN and retrying, so either
 // side can start/stop/restart independently.
 //
-// Header-only / fully inline so the several hyumm_nrt executables that include
-// this header share one definition without an ODR violation.
+// The transport (open/read/write of the binary packet:: structs on /dev/rtpN)
+// is pure POSIX and byte-identical to the Noetic version, so it stays wire-
+// compatible with the unchanged RT controller. Only the logging moved to
+// rclcpp. Header-only / fully inline so the several hyumm_nrt executables that
+// include this header share one definition without an ODR violation.
 // ---------------------------------------------------------------------------
 class XddpLink {
 public:
-  XddpLink() = default;
+  XddpLink() : logger_(rclcpp::get_logger("xddp")),
+               clock_(RCL_STEADY_TIME) {}
   ~XddpLink() { closeFd(); }
 
   XddpLink(const XddpLink&) = delete;
@@ -45,6 +49,9 @@ public:
     name_ = name; port_ = port; rt_task_ = rt_task; enabled_ = enabled;
   }
 
+  // Optional: route logs through the owning node's logger.
+  void setLogger(const rclcpp::Logger& logger) { logger_ = logger; }
+
   bool enabled() const { return enabled_; }
   bool up()      const { return fd_ >= 0; }
 
@@ -58,15 +65,17 @@ public:
       int fd = ::open(dev, O_RDWR | O_NONBLOCK);
       if (fd >= 0) {
         fd_ = fd;
-        ROS_INFO("XDDP link UP: %s on /dev/rtp%d (rt task '%s')",
-                 name_.c_str(), port_, rt_task_.c_str());
+        RCLCPP_INFO(logger_, "XDDP link UP: %s on /dev/rtp%d (rt task '%s')",
+                    name_.c_str(), port_, rt_task_.c_str());
       } else {
-        ROS_WARN_THROTTLE(5.0, "XDDP %s: open /dev/rtp%d failed: %s",
-                          name_.c_str(), port_, std::strerror(errno));
+        RCLCPP_WARN_THROTTLE(logger_, clock_, 5000,
+                             "XDDP %s: open /dev/rtp%d failed: %s",
+                             name_.c_str(), port_, std::strerror(errno));
       }
     } else if (fd_ >= 0 && !alive) {
-      ROS_WARN("XDDP link DOWN: %s - rt task '%s' gone, releasing /dev/rtp%d",
-               name_.c_str(), rt_task_.c_str(), port_);
+      RCLCPP_WARN(logger_,
+                  "XDDP link DOWN: %s - rt task '%s' gone, releasing /dev/rtp%d",
+                  name_.c_str(), rt_task_.c_str(), port_);
       closeFd();
     }
   }
@@ -112,6 +121,8 @@ private:
   int  port_    = -1;
   int  fd_      = -1;
   bool enabled_ = false;
+  rclcpp::Logger logger_;
+  rclcpp::Clock  clock_;
 };
 
 #endif  // XDDP_ROS_H

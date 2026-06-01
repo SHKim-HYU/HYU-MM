@@ -1,4 +1,12 @@
+// multi_hyumm_xddp_node -- ROS2 port.
+//
+// Reads odom from RT on /dev/rtp<STATE_INFO_1> in a thread -> /odom, and
+// forwards /cmd_vel onto /dev/rtp<CMD_INFO_1>. XDDP transport byte-identical to
+// the Noetic version.
+
 #include "multi_hyumm_xddp_node.h"
+
+static rclcpp::Node::SharedPtr g_node;
 
 static void fail(const char *reason)
 {
@@ -6,7 +14,7 @@ static void fail(const char *reason)
 	exit(EXIT_FAILURE);
 }
 
-void readOdomData(ros::Publisher& pubOdometry)
+void readOdomData(rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdometry)
 {
 	if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_STATE_INFO_1) < 0)
 		fail("asprintf");
@@ -16,14 +24,14 @@ void readOdomData(ros::Publisher& pubOdometry)
 	if (odom_sockfd < 0)
 		fail("open");
 
-    while (ros::ok())
+    while (rclcpp::ok())
     {
         /* Get the next message from realtime_thread. */
-		ret = read(odom_sockfd, (void *)odom_nrt, BUFLEN_ODOM); 
+		ret = read(odom_sockfd, (void *)odom_nrt, BUFLEN_ODOM);
 
         if(ret>0)
         {
-            odom_msg.header.stamp = ros::Time::now();
+            odom_msg.header.stamp = g_node->now();
             odom_msg.header.frame_id = "odom";
             odom_msg.pose.pose.position.x = odom_nrt->pose.position.x;
             odom_msg.pose.pose.position.y = odom_nrt->pose.position.y;
@@ -39,13 +47,13 @@ void readOdomData(ros::Publisher& pubOdometry)
             odom_msg.twist.twist.angular.y = odom_nrt->twist.angular.y;
             odom_msg.twist.twist.angular.z = odom_nrt->twist.angular.z;
 
-            pubOdometry.publish(odom_msg);
+            pubOdometry->publish(odom_msg);
         }
     }
     close(odom_sockfd);
 }
 
-void twistCallback(const geometry_msgs::Twist::ConstPtr& msg) {
+void twistCallback(const geometry_msgs::msg::Twist::ConstSharedPtr msg) {
     twist_nrt->linear.x = msg->linear.x;
     twist_nrt->linear.y = msg->linear.y;
     twist_nrt->linear.z = msg->linear.z;
@@ -56,7 +64,7 @@ void twistCallback(const geometry_msgs::Twist::ConstPtr& msg) {
     ret = write(cmd_vel_sockfd, (void *)twist_nrt, BUFLEN_TWIST);
 }
 
-int main(int argc, char** argv) 
+int main(int argc, char** argv)
 {
     if (asprintf(&devname, "/dev/rtp%d", XDDP_PORT_CMD_INFO_1) < 0)
 		fail("asprintf");
@@ -66,23 +74,19 @@ int main(int argc, char** argv)
 	if (cmd_vel_sockfd < 0)
 		fail("open");
 
+    rclcpp::init(argc, argv);
+    g_node = rclcpp::Node::make_shared("xddp_nrt");
 
-    ros::init(argc, argv, "xddp_nrt");
-    ros::NodeHandle nh_;
+    auto pubOdometry = g_node->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
+    auto subTwist = g_node->create_subscription<geometry_msgs::msg::Twist>(
+        "/cmd_vel", 1, twistCallback);
 
-    ros::Publisher pubOdometry = nh_.advertise<nav_msgs::Odometry>("/odom", 10);
-    ros::Subscriber subTwist = nh_.subscribe("/cmd_vel",1,twistCallback);    
-    
+    std::thread odom_thread(readOdomData, pubOdometry);
 
-    std::thread odom_thread(readOdomData, std::ref(pubOdometry));
+    rclcpp::spin(g_node);
 
-    ros::Rate loop_rate(1000);
-
-
-    ros::spin();
-    loop_rate.sleep();
-   
     odom_thread.join();
 
+    rclcpp::shutdown();
     return 0;
 }

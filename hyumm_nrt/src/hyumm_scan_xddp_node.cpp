@@ -1,10 +1,26 @@
-#include "ros/ros.h"
+// hyumm_scan_xddp_node -- ROS2 port.
+//
+// Legacy single-file vive->XDDP bridge (superseded by hyumm_vive_xddp_node,
+// which uses the in-process ViveLocalizer + self-healing XddpLink). Kept for
+// parity: it computes the mobile-base pose/twist from the raw libsurvive
+// tracker topics with a fixed-tracker calibration and writes odom + forwarded
+// /cmd_vel straight onto /dev/rtpN. The XDDP transport is byte-identical to the
+// Noetic version (open/write of packet:: structs); only ROS API + tf2 changed.
+
+#include <rclcpp/rclcpp.hpp>
 #include <cmath>
-#include <tf/transform_datatypes.h>
-#include "geometry_msgs/PoseStamped.h"
-#include "geometry_msgs/TwistStamped.h"
-#include "geometry_msgs/Twist.h"
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Vector3.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "xddp_ros.h"
+
+// --- ROS2 node handle (for now() + pub/sub) ---
+static rclcpp::Node::SharedPtr g_node;
 
 // --- XDDP ---
 static int xddp_fd = -1;
@@ -35,10 +51,10 @@ static const double TRACKER_LINE_ANGLE = atan2(OFFSET_FRONT_Y - OFFSET_REAR_Y,
 static const double OCCLUSION_TIMEOUT = 0.1;
 
 // --- Tracker data ---
-static geometry_msgs::PoseStamped fixed_pose, mobile_rear_pose, mobile_front_pose;
-static geometry_msgs::TwistStamped mobile_rear_twist, mobile_front_twist;
+static geometry_msgs::msg::PoseStamped fixed_pose, mobile_rear_pose, mobile_front_pose;
+static geometry_msgs::msg::TwistStamped mobile_rear_twist, mobile_front_twist;
 static bool fixed_received = false;
-static ros::Time mobile_rear_last_time, mobile_front_last_time;
+static rclcpp::Time mobile_rear_last_time, mobile_front_last_time;
 static bool mobile_rear_ever_received = false, mobile_front_ever_received = false;
 
 // --- Multi-turn yaw tracking ---
@@ -52,39 +68,39 @@ static double normalizeAngle(double a) {
 	return a;
 }
 
-// Helper: geometry_msgs::Pose -> tf::Transform
-static tf::Transform poseToTransform(const geometry_msgs::Pose& p) {
-	return tf::Transform(
-		tf::Quaternion(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w),
-		tf::Vector3(p.position.x, p.position.y, p.position.z));
+// Helper: geometry_msgs::msg::Pose -> tf2::Transform
+static tf2::Transform poseToTransform(const geometry_msgs::msg::Pose& p) {
+	tf2::Transform T;
+	tf2::fromMsg(p, T);
+	return T;
 }
 
-void fixedPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+void fixedPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
 	fixed_pose = *msg;
 	fixed_received = true;
 }
 
-void mobileRearPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+void mobileRearPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
 	mobile_rear_pose = *msg;
-	mobile_rear_last_time = ros::Time::now();
+	mobile_rear_last_time = g_node->now();
 	mobile_rear_ever_received = true;
 }
 
-void mobileRearTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
+void mobileRearTwistCallback(const geometry_msgs::msg::TwistStamped::ConstSharedPtr msg) {
 	mobile_rear_twist = *msg;
 }
 
-void mobileFrontPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+void mobileFrontPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
 	mobile_front_pose = *msg;
-	mobile_front_last_time = ros::Time::now();
+	mobile_front_last_time = g_node->now();
 	mobile_front_ever_received = true;
 }
 
-void mobileFrontTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg) {
+void mobileFrontTwistCallback(const geometry_msgs::msg::TwistStamped::ConstSharedPtr msg) {
 	mobile_front_twist = *msg;
 }
 
-void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
+void cmdvelCallback(const geometry_msgs::msg::Twist::ConstSharedPtr msg) {
 	tx_cmdvel_msg.linear.x = msg->linear.x;
 	tx_cmdvel_msg.linear.y = msg->linear.y;
 	tx_cmdvel_msg.linear.z = msg->linear.z;
@@ -92,36 +108,37 @@ void cmdvelCallback(const geometry_msgs::Twist::ConstPtr& msg) {
 	tx_cmdvel_msg.angular.y = msg->angular.y;
 	tx_cmdvel_msg.angular.z = msg->angular.z;
 
-	write(xddp_cmdvel_fd, &tx_cmdvel_msg, BUFLEN_TWIST);
+	if (xddp_cmdvel_fd >= 0)
+		(void)!write(xddp_cmdvel_fd, &tx_cmdvel_msg, BUFLEN_TWIST);
 }
 
 void computeAndSend() {
 	if(!fixed_received) return;
 
 	// --- Check tracker occlusion ---
-	ros::Time now = ros::Time::now();
+	rclcpp::Time now = g_node->now();
 	bool rear_active = mobile_rear_ever_received &&
-	                   (now - mobile_rear_last_time).toSec() < OCCLUSION_TIMEOUT;
+	                   (now - mobile_rear_last_time).seconds() < OCCLUSION_TIMEOUT;
 	bool front_active = mobile_front_ever_received &&
-	                    (now - mobile_front_last_time).toSec() < OCCLUSION_TIMEOUT;
+	                    (now - mobile_front_last_time).seconds() < OCCLUSION_TIMEOUT;
 
 	if(!rear_active && !front_active) return;
 
 	// --- Calibration transform ---
-	tf::Transform T_fixed_vive = poseToTransform(fixed_pose.pose);
-	tf::Transform T_fixed_ref(tf::Quaternion(0, 0, 0, 1),
-	                           tf::Vector3(REF_X, REF_Y, REF_Z));
-	tf::Transform T_calib = T_fixed_ref * T_fixed_vive.inverse();
+	tf2::Transform T_fixed_vive = poseToTransform(fixed_pose.pose);
+	tf2::Transform T_fixed_ref(tf2::Quaternion(0, 0, 0, 1),
+	                           tf2::Vector3(REF_X, REF_Y, REF_Z));
+	tf2::Transform T_calib = T_fixed_ref * T_fixed_vive.inverse();
 
 	double x, y, raw_yaw;
-	tf::Transform T_active_ref;       // tracker-in-ref for twist computation
+	tf2::Transform T_active_ref;       // tracker-in-ref for twist computation
 	double active_offset_x, active_offset_y;
-	const geometry_msgs::TwistStamped* active_twist;
+	const geometry_msgs::msg::TwistStamped* active_twist;
 
 	if(rear_active && front_active) {
 		// ====== BOTH TRACKERS: fused mode ======
-		tf::Transform T_rear_ref  = T_calib * poseToTransform(mobile_rear_pose.pose);
-		tf::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
+		tf2::Transform T_rear_ref  = T_calib * poseToTransform(mobile_rear_pose.pose);
+		tf2::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
 
 		double rear_x  = T_rear_ref.getOrigin().x();
 		double rear_y  = T_rear_ref.getOrigin().y();
@@ -153,10 +170,10 @@ void computeAndSend() {
 
 	} else if(rear_active) {
 		// ====== REAR ONLY (front occluded) ======
-		tf::Transform T_rear_ref = T_calib * poseToTransform(mobile_rear_pose.pose);
-		tf::Transform T_rear_offset(tf::Quaternion(0, 0, 0, 1),
-		                             tf::Vector3(OFFSET_REAR_X, OFFSET_REAR_Y, 0));
-		tf::Transform T_base = T_rear_ref * T_rear_offset.inverse();
+		tf2::Transform T_rear_ref = T_calib * poseToTransform(mobile_rear_pose.pose);
+		tf2::Transform T_rear_offset(tf2::Quaternion(0, 0, 0, 1),
+		                             tf2::Vector3(OFFSET_REAR_X, OFFSET_REAR_Y, 0));
+		tf2::Transform T_base = T_rear_ref * T_rear_offset.inverse();
 
 		x = T_base.getOrigin().x();
 		y = T_base.getOrigin().y();
@@ -171,10 +188,10 @@ void computeAndSend() {
 
 	} else {
 		// ====== FRONT ONLY (rear occluded) ======
-		tf::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
-		tf::Transform T_front_offset(tf::Quaternion(0, 0, 0, 1),
-		                              tf::Vector3(OFFSET_FRONT_X, OFFSET_FRONT_Y, 0));
-		tf::Transform T_base = T_front_ref * T_front_offset.inverse();
+		tf2::Transform T_front_ref = T_calib * poseToTransform(mobile_front_pose.pose);
+		tf2::Transform T_front_offset(tf2::Quaternion(0, 0, 0, 1),
+		                              tf2::Vector3(OFFSET_FRONT_X, OFFSET_FRONT_Y, 0));
+		tf2::Transform T_base = T_front_ref * T_front_offset.inverse();
 
 		x = T_base.getOrigin().x();
 		y = T_base.getOrigin().y();
@@ -211,25 +228,25 @@ void computeAndSend() {
 	tx_msg.pose.orientation.w = cos(accumulated_yaw / 2.0);
 
 	// --- Twist: transform active tracker velocity to base center velocity in ref frame ---
-	tf::Vector3 v_lin_body(active_twist->twist.linear.x,
-	                       active_twist->twist.linear.y,
-	                       active_twist->twist.linear.z);
-	tf::Vector3 v_ang_body(active_twist->twist.angular.x,
-	                       active_twist->twist.angular.y,
-	                       active_twist->twist.angular.z);
+	tf2::Vector3 v_lin_body(active_twist->twist.linear.x,
+	                        active_twist->twist.linear.y,
+	                        active_twist->twist.linear.z);
+	tf2::Vector3 v_ang_body(active_twist->twist.angular.x,
+	                        active_twist->twist.angular.y,
+	                        active_twist->twist.angular.z);
 
 	// Rotate twist from tracker body frame to reference frame
-	tf::Matrix3x3 R_ref = T_active_ref.getBasis();
-	tf::Vector3 v_tracker_ref = R_ref * v_lin_body;
-	tf::Vector3 w_ref         = R_ref * v_ang_body;
+	tf2::Matrix3x3 R_ref = T_active_ref.getBasis();
+	tf2::Vector3 v_tracker_ref = R_ref * v_lin_body;
+	tf2::Vector3 w_ref         = R_ref * v_ang_body;
 
 	// Offset correction: v_base = v_tracker - w x r_offset_ref
 	double cos_yaw_cur = cos(raw_yaw);
 	double sin_yaw_cur = sin(raw_yaw);
-	tf::Vector3 r_offset_ref(cos_yaw_cur * active_offset_x - sin_yaw_cur * active_offset_y,
+	tf2::Vector3 r_offset_ref(cos_yaw_cur * active_offset_x - sin_yaw_cur * active_offset_y,
 	                          sin_yaw_cur * active_offset_x + cos_yaw_cur * active_offset_y,
 	                          0);
-	tf::Vector3 v_base_ref = v_tracker_ref - w_ref.cross(r_offset_ref);
+	tf2::Vector3 v_base_ref = v_tracker_ref - w_ref.cross(r_offset_ref);
 
 	tx_msg.twist.linear.x  = v_base_ref.x();
 	tx_msg.twist.linear.y  = v_base_ref.y();
@@ -239,7 +256,8 @@ void computeAndSend() {
 	tx_msg.twist.angular.z = w_ref.z();
 
 	// Send via XDDP
-	write(xddp_fd, &tx_msg, BUFLEN_ODOM);
+	if (xddp_fd >= 0)
+		(void)!write(xddp_fd, &tx_msg, BUFLEN_ODOM);
 }
 
 static void fail(const char *reason) {
@@ -266,31 +284,40 @@ int main(int argc, char** argv)
 	if(xddp_cmdvel_fd < 0)
 		fail("open xddp_cmdvel_fd");
 
-	ros::init(argc, argv, "hyumm_scan_xddp_node");
-	ros::NodeHandle nh;
+	rclcpp::init(argc, argv);
+	g_node = rclcpp::Node::make_shared("hyumm_scan_xddp_node");
+	mobile_rear_last_time = g_node->now();
+	mobile_front_last_time = g_node->now();
 
 	// Fixed tracker
-	ros::Subscriber sub_fixed_pose = nh.subscribe("/vive/tracker_fixed/pose", 1, fixedPoseCallback);
+	auto sub_fixed_pose = g_node->create_subscription<geometry_msgs::msg::PoseStamped>(
+		"/vive/tracker_fixed/pose", 1, fixedPoseCallback);
 
 	// Rear tracker
-	ros::Subscriber sub_mobile_rear_pose  = nh.subscribe("/vive/tracker_mobile_rear/pose",  1, mobileRearPoseCallback);
-	ros::Subscriber sub_mobile_rear_twist = nh.subscribe("/vive/tracker_mobile_rear/twist", 1, mobileRearTwistCallback);
+	auto sub_mobile_rear_pose = g_node->create_subscription<geometry_msgs::msg::PoseStamped>(
+		"/vive/tracker_mobile_rear/pose", 1, mobileRearPoseCallback);
+	auto sub_mobile_rear_twist = g_node->create_subscription<geometry_msgs::msg::TwistStamped>(
+		"/vive/tracker_mobile_rear/twist", 1, mobileRearTwistCallback);
 
 	// Front tracker
-	ros::Subscriber sub_mobile_front_pose  = nh.subscribe("/vive/tracker_mobile_front/pose",  1, mobileFrontPoseCallback);
-	ros::Subscriber sub_mobile_front_twist = nh.subscribe("/vive/tracker_mobile_front/twist", 1, mobileFrontTwistCallback);
+	auto sub_mobile_front_pose = g_node->create_subscription<geometry_msgs::msg::PoseStamped>(
+		"/vive/tracker_mobile_front/pose", 1, mobileFrontPoseCallback);
+	auto sub_mobile_front_twist = g_node->create_subscription<geometry_msgs::msg::TwistStamped>(
+		"/vive/tracker_mobile_front/twist", 1, mobileFrontTwistCallback);
 
 	// cmd_vel
-	ros::Subscriber sub_cmd_vel = nh.subscribe("/cmd_vel", 1, cmdvelCallback);
+	auto sub_cmd_vel = g_node->create_subscription<geometry_msgs::msg::Twist>(
+		"/cmd_vel", 1, cmdvelCallback);
 
-	ros::Rate rate(100);
-	while(ros::ok()) {
-		ros::spinOnce();
+	rclcpp::Rate rate(100);
+	while(rclcpp::ok()) {
+		rclcpp::spin_some(g_node);
 		computeAndSend();
 		rate.sleep();
 	}
 
 	close(xddp_fd);
 	close(xddp_cmdvel_fd);
+	rclcpp::shutdown();
 	return 0;
 }

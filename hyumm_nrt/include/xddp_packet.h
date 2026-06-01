@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 // Command
-#define XDDP_PORT_CMD_INFO_1 0		// 
+#define XDDP_PORT_CMD_INFO_1 0		//
 #define XDDP_PORT_CMD_INFO_2 1		// 
 #define XDDP_PORT_CMD_INFO_3 2		// 
 #define IDDP_PORT_CMD_INFO_1 3		// 
