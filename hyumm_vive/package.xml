@@ -1,19 +1,24 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>hyumm_vive</name>
   <version>0.0.1</version>
   <description>
     Header-only vive localization library (ViveLocalizer). Anchors the libsurvive
     tracker poses onto vive_world (fixed reference tracker) and computes the
     mobile-base center pose + twist. Consumed in-process by the hyumm_nrt node;
-    no ROS nodes or topic exchange of its own.
+    no ROS nodes or topic exchange of its own. ROS2 (ament) port: tf2 datatypes.
   </description>
   <maintainer email="fndlrkdl94@gmail.com">robot</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>roscpp</depend>
-  <depend>tf</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
   <depend>geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

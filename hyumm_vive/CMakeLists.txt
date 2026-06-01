@@ -1,22 +1,21 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.5)
 project(hyumm_vive)
 
-add_compile_options(-std=c++14)
-
 # Header-only localization library (ViveLocalizer). No nodes -- the hyumm_nrt
-# node links this and does the TF broadcast + XDDP bridge.
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  tf
-  geometry_msgs
-)
+# node includes this header and does the TF broadcast + XDDP bridge.
+find_package(ament_cmake REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
-catkin_package(
-  INCLUDE_DIRS include
-  CATKIN_DEPENDS roscpp tf geometry_msgs
+install(DIRECTORY include/
+  DESTINATION include
 )
-
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
 install(DIRECTORY rviz
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_export_include_directories(include)
+ament_export_dependencies(tf2 tf2_geometry_msgs geometry_msgs)
+
+ament_package()

@@ -1,21 +1,26 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>hyumm_description</name>
   <version>0.0.1</version>
   <description>
-    ROS1 (catkin) robot description for the HYU-MM mobile manipulator (hyumm_scan:
-    mobile base + Indy7 + scanner). Meshes/URDF copied from the ROS2/ament
-    hyumm_scan_description so they are resolvable on the ROS1 rospack path
-    (package://hyumm_description/...). Used for the RViz robot model.
+    ROS2 (ament) robot description for the HYU-MM mobile manipulator (hyumm_scan:
+    mobile base + Indy7 + scanner). Meshes/URDF resolvable on the ament path
+    (package://hyumm_description/...). Used for the RViz robot model (actual +
+    nominal ghost via robot_state_publisher frame_prefix).
   </description>
   <maintainer email="fndlrkdl94@gmail.com">SHKim-HYU</maintainer>
   <license>BSD</license>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher_gui</exec_depend>
-  <exec_depend>rviz</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>
