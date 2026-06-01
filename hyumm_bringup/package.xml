@@ -1,34 +1,28 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>hyumm_bringup</name>
-  <version>0.0.1</version>
-  <description>The hyumm_bringup package</description>
+  <version>0.0.0</version>
+  <description>
+    ROS2 (ament) bring-up launch files for the HYU-MM mobile manipulator:
+    libsurvive vive backend + nrt vive/XDDP node + actual/nominal robot models
+    + teleop + RViz.
+  </description>
+  <maintainer email="fndlrkdl94@gmail.com">robot</maintainer>
+  <license>BSD</license>
 
-  <maintainer email="tjsghd101@naver.com">Sunhong Kim</maintainer>
-  
-  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <buildtool_depend>catkin</buildtool_depend>
-  <build_depend>message_generation</build_depend>
-  <build_depend>roscpp</build_depend>
-  <build_depend>std_msgs</build_depend>
-  <build_export_depend>roscpp</build_export_depend>
-  <build_export_depend>std_msgs</build_export_depend>
-  <exec_depend>roscpp</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <!-- launch includes the vive stack -->
-  <exec_depend>hyumm_vive</exec_depend>
   <exec_depend>vive_libsurvive_ros</exec_depend>
   <exec_depend>hyumm_nrt</exec_depend>
-  <exec_depend>teleop_twist_keyboard</exec_depend>
-  <!-- actual + nominal robot models -->
   <exec_depend>hyumm_description</exec_depend>
+  <exec_depend>hyumm_vive</exec_depend>
+  <exec_depend>hyumm_teleop</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>
 
-  <!-- The export tag contains other, unspecified, tags -->
   <export>
-    <!-- Other tools can request additional information be placed here -->
-
+    <build_type>ament_cmake</build_type>
   </export>
 </package>
