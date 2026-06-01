@@ -240,6 +240,7 @@ int main(int argc, char** argv) {
   rclcpp::Rate rate(node->loopRateHz());
   double t = 0.0;
   bool warned_wait = false;
+  bool got_policy = false;
 
   RCLCPP_INFO(node->get_logger(), "HYUMM bridge (real MRT loop) starting at %.0f Hz", node->loopRateHz());
   while (rclcpp::ok()) {
@@ -257,11 +258,22 @@ int main(int argc, char** argv) {
 
     // 4) if a plan exists, compute desired joints AT THE MEASURED STATE and emit
     if (mrt.initialPolicyReceived()) {
+      if (!got_policy) {
+        RCLCPP_INFO(node->get_logger(),
+                    "first MPC policy received -- closed-loop running");
+        got_policy = true;
+      }
       ocs2::vector_t xd, ud;
       size_t mode = 0;
       mrt.evaluatePolicy(t, obs.state, xd, ud, mode);
       node->sendDesired(xd, ud, dt);
       obs.input = ud;   // report the applied input back to MPC next cycle
+      // periodic heartbeat: measured base + desired base/arm velocity
+      RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000,
+          "meas base[%.3f %.3f %.3f] meas?=%d/%d  des vbase[%.2f %.2f %.2f] dq0=%.2f",
+          obs.state(0), obs.state(1), obs.state(2),
+          node->haveBase(), node->haveArm(),
+          ud(0), ud(1), ud(2), ud(3));
     } else if (!warned_wait) {
       RCLCPP_WARN(node->get_logger(),
                   "waiting for first MPC policy (is hyumm_mpc_node running?)");
