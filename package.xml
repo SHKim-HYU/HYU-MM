@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hyumm_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Real MRT loop for HYU-MM: feeds a measured 9-DOF SystemObservation (vive base
+    pose + arm joint states) into the hyumm_ocs2 OCS2 MPC and emits the optimal
+    desired joints to the Xenomai RT controller over XDDP (packet::RobotInfo.des).
+    Replaces hyumm_ocs2's MRT_ROS_Dummy_Loop with closed-loop measured feedback.
+  </description>
+  <maintainer email="fndlrkdl94@gmail.com">robot</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2</depend>
+  <depend>hyumm_nrt</depend>     <!-- xddp_ros.h, xddp_packet.h (header-only) -->
+  <depend>hyumm_ocs2</depend>    <!-- HyummInterface, definitions.h, package_path.h -->
+  <depend>ocs2_core</depend>
+  <depend>ocs2_mpc</depend>
+  <depend>ocs2_oc</depend>
+  <depend>ocs2_ros_interfaces</depend>
+  <depend>ocs2_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
