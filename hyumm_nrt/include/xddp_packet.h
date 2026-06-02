@@ -121,6 +121,23 @@ struct RobotState{
 	SingleRigidBody base;
 };
 
+// Online-planning handshake between the RT controller and the OCS2 MPC (NRT).
+//   RT  -> OCS2 : cmd  (start the front/back plan, or stop)
+//   OCS2-> RT   : status + fault + seq (running/fault/done, fault code, liveness)
+// Carried in RobotInfo.mpc on BOTH the RT->NRT state packet (cmd) and the
+// NRT->RT desired packet (status), so a single packet type serves both directions.
+// MUST stay byte-identical to KPOS_Foundation/include/Common/xddp_packet.h.
+enum MpcCmd    : uint8_t { MPC_CMD_NONE = 0, MPC_CMD_START_FRONT = 1, MPC_CMD_START_BACK = 2, MPC_CMD_STOP = 3 };
+enum MpcStatus : uint8_t { MPC_STAT_IDLE = 0, MPC_STAT_RUNNING = 1, MPC_STAT_FAULT = 2, MPC_STAT_DONE = 3 };
+enum MpcFault  : uint16_t { MPC_FAULT_NONE = 0, MPC_FAULT_COLLISION = 1, MPC_FAULT_MPC_FAIL = 2, MPC_FAULT_NO_PLAN = 3 };
+
+struct MpcHandshake{
+	uint8_t  cmd{0};     // RT  -> OCS2 : MpcCmd
+	uint8_t  status{0};  // OCS2-> RT   : MpcStatus
+	uint16_t fault{0};   // OCS2-> RT   : MpcFault (0 = none)
+	uint32_t seq{0};     // OCS2-> RT   : setpoint sequence (increments each cycle; staleness/liveness)
+};
+
 template<int N>
 struct RobotInfo{
 	Time time;
@@ -129,6 +146,7 @@ struct RobotInfo{
 	RobotState<N> act;
 	RobotState<N> nom;
 	RobotState<N> adm;
+	MpcHandshake mpc;   // OCS2 <-> RT online-planning handshake (appended; existing offsets unchanged)
 };
 
 template<int N>
