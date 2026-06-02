@@ -36,6 +36,10 @@ def generate_launch_description():
         DeclareLaunchArgument('csv_back', default_value=default_back),
         # Handshake: RT->NRT command port (must match RTECAT XDDP_PORT_MPC_CMD).
         DeclareLaunchArgument('xddp_cmd_port', default_value='6'),
+        # ROS2 verification (no Xenomai/XDDP): mirror XDDP to ROS topics + loopback.
+        # Drive ~/mpc_cmd (1 START_FRONT, 2 START_BACK), echo ~/desired & ~/mpc_status.
+        # Override the slip with -p loopback_base_error:=[0.1,0.0,0.0].
+        DeclareLaunchArgument('ros_debug', default_value='false'),
         Node(
             package='hyumm_bridge',
             executable='hyumm_bridge_node',
@@ -47,7 +51,9 @@ def generate_launch_description():
                  'csv_front': LaunchConfiguration('csv_front'),
                  'csv_back': LaunchConfiguration('csv_back'),
                  'xddp_cmd_port': ParameterValue(
-                     LaunchConfiguration('xddp_cmd_port'), value_type=int)},
+                     LaunchConfiguration('xddp_cmd_port'), value_type=int),
+                 'ros_debug': ParameterValue(
+                     LaunchConfiguration('ros_debug'), value_type=bool)},
             ],
         ),
     ])
