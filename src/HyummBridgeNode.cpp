@@ -27,6 +27,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 
 #include <ocs2_core/Types.h>
 #include <ocs2_mpc/SystemObservation.h>
@@ -90,6 +91,15 @@ class HyummBridgeNode : public rclcpp::Node {
     cmd_port_ = declare_parameter<int>("xddp_cmd_port", 6);  // RT -> NRT MpcHandshake
     rt_task_cmd_ = declare_parameter<std::string>("rt_task_cmd", "tx_mpc_cmd_task");
 
+    // --- ROS2 verification mode (no Xenomai/XDDP) ---
+    // Mirrors the XDDP I/O to ROS topics and CLOSES the loop by feeding the desired
+    // back as the measured state (+ optional base slip), so the whole
+    // MPC -> bridge -> handshake -> setpoint pipeline runs and is inspectable in
+    // ROS2 before the RT test. Publishes /joint_states for RViz (nominal robot).
+    ros_debug_ = declare_parameter<bool>("ros_debug", false);
+    loopback_err_ = declare_parameter<std::vector<double>>(
+        "loopback_base_error", std::vector<double>{0.0, 0.0, 0.0});
+
     // --- Phase-clock collision-stop ---
     // When enabled, a binary self-collision monitor (built in main) gates the
     // emitted desired velocity by a rate in [0,1]: rate ramps to 0 on a current/
@@ -122,6 +132,22 @@ class HyummBridgeNode : public rclcpp::Node {
         std::chrono::duration<double>(watchdog_period_),
         [this]() { desired_link_.poll(); cmd_link_.poll(); });
 
+    if (ros_debug_) {
+      cmd_ros_sub_ = create_subscription<std_msgs::msg::UInt8>(
+          "~/mpc_cmd", 10,
+          [this](std_msgs::msg::UInt8::ConstSharedPtr m) { ros_cmd_ = m->data; });
+      desired_pub_ = create_publisher<sensor_msgs::msg::JointState>("~/desired", 10);
+      status_pub_ = create_publisher<std_msgs::msg::UInt8>("~/mpc_status", 10);
+      js_pub_ = create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+      RCLCPP_WARN(get_logger(),
+          "ROS_DEBUG on: cmd<-~/mpc_cmd, desired->~/desired (pos/vel/effort=accel), "
+          "status->~/mpc_status, /joint_states for RViz; LOOPBACK measured state "
+          "(base slip [%.3f %.3f %.3f]). No XDDP/sensors needed.",
+          loopback_err_.size() > 0 ? loopback_err_[0] : 0.0,
+          loopback_err_.size() > 1 ? loopback_err_[1] : 0.0,
+          loopback_err_.size() > 2 ? loopback_err_[2] : 0.0);
+    }
+
     RCLCPP_INFO(get_logger(),
         "hyumm_bridge: base<-%s arm<-%s ; send_desired=%s (port /dev/rtp%d task '%s')",
         base_pose_topic_.c_str(), joint_states_topic_.c_str(),
@@ -150,6 +176,10 @@ class HyummBridgeNode : public rclcpp::Node {
   // Overwrite the 18-D state [pos(9); vel(9)] with the latest measurements (leaves
   // entries untouched until data arrives, so the seed state is used meanwhile).
   void fillMeasuredState(ocs2::vector_t& state) const {
+    if (ros_debug_ && loopback_state_.size() == static_cast<long>(hyumm_ocs2::STATE_DIM)) {
+      state = loopback_state_;   // ROS2 verification: loopback (perfect tracking + slip)
+      return;
+    }
     if (have_base_) {
       state(hyumm_ocs2::state_idx::BASE_X) = base_x_;
       state(hyumm_ocs2::state_idx::BASE_Y) = base_y_;
@@ -170,7 +200,7 @@ class HyummBridgeNode : public rclcpp::Node {
   // Emit the MPC-optimal desired joints to RT over XDDP (no-op while link DOWN /
   // send_desired=false).
   void sendDesired(const ocs2::vector_t& xd, const ocs2::vector_t& ud, double dt) {
-    if (!send_desired_) return;
+    if (!send_desired_ && !ros_debug_) return;
     if (!int_init_) {
       for (int i = 0; i < MM_DOF; ++i) des_pos_int_[i] = xd(i);
       int_init_ = true;
@@ -205,13 +235,14 @@ class HyummBridgeNode : public rclcpp::Node {
     pkt.mpc.status = mpc_status_;
     pkt.mpc.fault = mpc_fault_;
     pkt.mpc.seq = ++mpc_seq_;
-    desired_link_.tryWrite(pkt);
+    if (send_desired_) desired_link_.tryWrite(pkt);
+    if (ros_debug_) publishPacket(pkt);   // ROS topic == the XDDP-bound (clamped) packet
   }
 
   // Emit a hold packet (no motion, current status) -- used while IDLE/DONE/FAULT so
   // the RT side keeps seeing the handshake status (and a fresh seq) without motion.
   void sendHold(const ocs2::vector_t& measured) {
-    if (!send_desired_) return;
+    if (!send_desired_ && !ros_debug_) return;
     packet::RobotInfo<MM_DOF> pkt{};
     for (int i = 0; i < MM_DOF; ++i) {
       pkt.des.jointState.position[i] = i < measured.size() ? measured(i) : 0.0;
@@ -221,12 +252,14 @@ class HyummBridgeNode : public rclcpp::Node {
     pkt.mpc.status = mpc_status_;
     pkt.mpc.fault = mpc_fault_;
     pkt.mpc.seq = ++mpc_seq_;
-    desired_link_.tryWrite(pkt);
+    if (send_desired_) desired_link_.tryWrite(pkt);
+    if (ros_debug_) publishPacket(pkt);
   }
 
   // Read the latest RT command (drains to the most recent). Returns MPC_CMD_NONE if
   // nothing new arrived this cycle.
   uint8_t tryReadCmd() {
+    if (ros_debug_) { uint8_t c = ros_cmd_; ros_cmd_ = packet::MPC_CMD_NONE; return c; }
     packet::MpcHandshake hs{};
     uint8_t cmd = packet::MPC_CMD_NONE;
     while (cmd_link_.tryRead(hs)) cmd = hs.cmd;  // drain to latest
@@ -238,6 +271,48 @@ class HyummBridgeNode : public rclcpp::Node {
   }
   const std::string& csvFront() const { return csv_front_; }
   const std::string& csvBack() const { return csv_back_; }
+
+  // ---- ros_debug helpers (ROS2 verification, no XDDP) ----
+  bool rosDebug() const { return ros_debug_; }
+  // Start the loopback measured state at the CSV row-0 pose (+ persistent slip).
+  void seedLoopback(const ocs2::TargetTrajectories& ref) {
+    loopback_state_ = ocs2::vector_t::Zero(hyumm_ocs2::STATE_DIM);
+    loopback_state_.head(hyumm_ocs2::POS_DIM) = ref.getDesiredState(0.0).tail(hyumm_ocs2::POS_DIM);
+    for (size_t i = 0; i < hyumm_ocs2::BASE_STATE_DIM && i < loopback_err_.size(); ++i)
+      loopback_state_(i) += loopback_err_[i];
+  }
+  // Forward-integrate the loopback robot (double integrator) from the MPC's
+  // commanded acceleration -- like the real plant, NOT perfect position tracking
+  // (which would re-inject the slip each cycle and demand huge velocities). The
+  // initial base offset (seedLoopback) is the slip the whole-body MPC recovers.
+  void updateLoopback(const ocs2::vector_t& ud, double dt) {
+    if (loopback_state_.size() != static_cast<long>(hyumm_ocs2::STATE_DIM)) return;
+    loopback_state_.tail(hyumm_ocs2::POS_DIM) += ud * dt;                              // accel -> vel
+    loopback_state_.head(hyumm_ocs2::POS_DIM) += loopback_state_.tail(hyumm_ocs2::POS_DIM) * dt;  // vel -> pos
+  }
+  // Publish the EXACT XDDP-bound packet (clamped pos/vel + accel-in-effort) + status
+  // to ROS, and /joint_states for RViz. So ~/desired mirrors what goes over XDDP.
+  void publishPacket(const packet::RobotInfo<MM_DOF>& pkt) {
+    static const std::vector<std::string> names = {
+        "lin_x_joint", "lin_y_joint", "rot_z_joint",
+        "joint0", "joint1", "joint2", "joint3", "joint4", "joint5"};
+    sensor_msgs::msg::JointState js;
+    js.header.stamp = now();
+    js.name = names;
+    js.position.resize(MM_DOF);
+    js.velocity.resize(MM_DOF);
+    js.effort.resize(MM_DOF);
+    for (int i = 0; i < MM_DOF; ++i) {
+      js.position[i] = pkt.des.jointState.position[i];
+      js.velocity[i] = pkt.des.jointState.velocity[i];
+      js.effort[i]   = pkt.des.jointState.accel[i];   // acceleration in effort
+    }
+    desired_pub_->publish(js);
+    sensor_msgs::msg::JointState rviz;
+    rviz.header.stamp = js.header.stamp; rviz.name = names; rviz.position = js.position;
+    js_pub_->publish(rviz);
+    std_msgs::msg::UInt8 s; s.data = pkt.mpc.status; status_pub_->publish(s);
+  }
 
  private:
   void poseCb(geometry_msgs::msg::PoseStamped::ConstSharedPtr m) {
@@ -309,6 +384,14 @@ class HyummBridgeNode : public rclcpp::Node {
   uint8_t mpc_status_ = 0;   // packet::MpcStatus, sent in the desired packet
   uint16_t mpc_fault_ = 0;   // packet::MpcFault
   uint32_t mpc_seq_ = 0;     // setpoint sequence (liveness)
+  // ros_debug (ROS2 verification): mirror XDDP I/O to topics + loopback measured state
+  bool ros_debug_ = false;
+  std::vector<double> loopback_err_;
+  uint8_t ros_cmd_ = 0;              // packet::MpcCmd from ~/mpc_cmd
+  ocs2::vector_t loopback_state_;    // loopback measured state (prev desired + slip)
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr cmd_ros_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr desired_pub_, js_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr status_pub_;
   double watchdog_period_ = 0.5;
   std::string desired_position_source_ = "state";
   bool command_base_ = true;
@@ -428,10 +511,12 @@ int main(int argc, char** argv) {
     if (cmd == packet::MPC_CMD_START_FRONT && state != St::RUNNING && have_front) {
       mrt.resetMpcNode(front_ref); t = 0.0; traj_end = front_ref.timeTrajectory.back();
       state = St::RUNNING; seg = "front"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
+      if (node->rosDebug()) node->seedLoopback(front_ref);
       RCLCPP_INFO(node->get_logger(), "START_FRONT -> RUNNING (0..%.1fs)", traj_end);
     } else if (cmd == packet::MPC_CMD_START_BACK && state != St::RUNNING && have_back) {
       mrt.resetMpcNode(back_ref); t = 0.0; traj_end = back_ref.timeTrajectory.back();
       state = St::RUNNING; seg = "back"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
+      if (node->rosDebug()) node->seedLoopback(back_ref);
       RCLCPP_INFO(node->get_logger(), "START_BACK -> RUNNING (0..%.1fs)", traj_end);
     } else if (cmd == packet::MPC_CMD_STOP) {
       state = St::IDLE; seg = "-"; node->setMpcStatus(packet::MPC_STAT_IDLE);
@@ -467,7 +552,8 @@ int main(int argc, char** argv) {
           node->setMpcStatus(packet::MPC_STAT_FAULT, packet::MPC_FAULT_COLLISION);
           RCLCPP_WARN(node->get_logger(), "COLLISION -> FAULT");
         } else {
-          node->sendDesired(xd, ud, dt);    // status RUNNING written in the packet
+          node->sendDesired(xd, ud, dt);    // status RUNNING in the packet; publishes ~/desired
+          if (node->rosDebug()) node->updateLoopback(ud, dt);  // forward-integrate loopback robot
           obs.input = ud;
           if (t >= traj_end) {
             state = St::DONE;
@@ -481,7 +567,7 @@ int main(int argc, char** argv) {
               seg.c_str(), t, traj_end, obs.state(0), obs.state(1), obs.state(2), ud(hyumm_ocs2::BASE_INPUT_DIM));
         }
       } else {
-        node->sendHold(obs.state);  // waiting for first policy
+        node->sendHold(obs.state);  // waiting for first policy (publishes ~/desired in ros_debug)
       }
     } else {
       // IDLE / DONE / FAULT: no motion, just report status (+ fresh seq) to RT.
