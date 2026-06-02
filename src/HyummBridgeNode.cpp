@@ -67,7 +67,10 @@ class HyummBridgeNode : public rclcpp::Node {
     desired_position_source_ = declare_parameter<std::string>("desired_position_source", "state");
     // Whether the base velocity (input[0..2]) is also sent to RT (des[0..2]); if
     // false the base stays on its own follower and only arm des[3..8] is meaningful.
-    command_base_ = declare_parameter<bool>("command_base", true);
+    // Default false: with model_settings.controlBase=false the MPC FREEZES the base
+    // (u_base=0) and plans only the arm, so OCS2 has no meaningful base command --
+    // the base follows its own trajectory follower and OCS2 compensates via the arm.
+    command_base_ = declare_parameter<bool>("command_base", false);
 
     // Safety clamps on the emitted velocity command (per-DOF magnitude).
     max_base_vel_ = declare_parameter<double>("max_base_vel", 1.0);   // m/s, rad/s
