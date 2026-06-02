@@ -264,7 +264,12 @@ int main(int argc, char** argv) {
   obs.input.setZero(hyumm_ocs2::INPUT_DIM);
   obs.time = 0.0;
   const ocs2::vector_t zeroInput = ocs2::vector_t::Zero(hyumm_ocs2::INPUT_DIM);
-  const ocs2::TargetTrajectories initTarget({obs.time}, {obs.state}, {zeroInput});
+  // Seed target is the 16-D packed reference [FK(seed) EE pose | seed joints] so the
+  // EndEffectorConstraint (head 7) and PostureCost (tail 9) read consistent values.
+  // A bare 9-D state here would feed the EE constraint a garbage 7-D "pose" (its
+  // head) and yank the plan until the real CSV target arrives. See REF_DIM.
+  const ocs2::TargetTrajectories initTarget(
+      {obs.time}, {interface.makeReference(obs.state)}, {zeroInput});
 
   // launchNodes() FIRST (creates the policy sub, observation pub and the MPC
   // reset service client on `node`), THEN resetMpcNode() which blocks until the
