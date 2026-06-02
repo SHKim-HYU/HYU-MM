@@ -70,11 +70,15 @@ class HyummBridgeNode : public rclcpp::Node {
     // Default false: with model_settings.controlBase=false the MPC FREEZES the base
     // (u_base=0) and plans only the arm, so OCS2 has no meaningful base command --
     // the base follows its own trajectory follower and OCS2 compensates via the arm.
-    command_base_ = declare_parameter<bool>("command_base", false);
+    // Whole-body: the MPC plans the base too, so its base command IS sent.
+    command_base_ = declare_parameter<bool>("command_base", true);
 
-    // Safety clamps on the emitted velocity command (per-DOF magnitude).
+    // Safety clamps on the emitted velocity/acceleration command (per-DOF magnitude).
     max_base_vel_ = declare_parameter<double>("max_base_vel", 1.0);   // m/s, rad/s
     max_arm_vel_ = declare_parameter<double>("max_arm_vel", 2.0);     // rad/s
+    max_base_acc_ = declare_parameter<double>("max_base_acc", 5.0);   // m/s^2, rad/s^2
+    max_arm_acc_ = declare_parameter<double>("max_arm_acc", 10.0);    // rad/s^2
+    vel_filter_alpha_ = declare_parameter<double>("vel_filter_alpha", 0.3);
 
     // --- Phase-clock collision-stop ---
     // When enabled, a binary self-collision monitor (built in main) gates the
@@ -88,6 +92,7 @@ class HyummBridgeNode : public rclcpp::Node {
     rate_ramp_down_ = declare_parameter<double>("rate_ramp_down", 0.20); // per cycle (stop fast)
 
     arm_q_.assign(arm_joint_names_.size(), 0.0);
+    arm_qd_.assign(arm_joint_names_.size(), 0.0);
 
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
         base_pose_topic_, 10,
@@ -128,18 +133,23 @@ class HyummBridgeNode : public rclcpp::Node {
     else        rate_ = std::min(1.0, rate_ + rate_ramp_up_);
   }
 
-  // Overwrite state[0..8] with the latest measurements (leaves arm/base untouched
-  // if not yet received, so the seed initial state is used until data arrives).
+  // Overwrite the 18-D state [pos(9); vel(9)] with the latest measurements (leaves
+  // entries untouched until data arrives, so the seed state is used meanwhile).
   void fillMeasuredState(ocs2::vector_t& state) const {
     if (have_base_) {
       state(hyumm_ocs2::state_idx::BASE_X) = base_x_;
       state(hyumm_ocs2::state_idx::BASE_Y) = base_y_;
-      state(hyumm_ocs2::state_idx::BASE_PSI) = base_yaw_;  // continuous (unwrapped)
+      state(hyumm_ocs2::state_idx::BASE_PSI) = base_yaw_;        // continuous (unwrapped)
+      state(hyumm_ocs2::VEL_OFFSET + 0) = base_vx_;              // base velocity (finite-diff)
+      state(hyumm_ocs2::VEL_OFFSET + 1) = base_vy_;
+      state(hyumm_ocs2::VEL_OFFSET + 2) = base_vyaw_;
     }
     if (have_arm_) {
       const size_t n = std::min<size_t>(arm_q_.size(), hyumm_ocs2::ARM_DIM);
-      for (size_t i = 0; i < n; ++i)
-        state(hyumm_ocs2::state_idx::ARM_Q0 + i) = arm_q_[i];
+      for (size_t i = 0; i < n; ++i) {
+        state(hyumm_ocs2::state_idx::ARM_Q0 + i) = arm_q_[i];                                 // position
+        state(hyumm_ocs2::VEL_OFFSET + hyumm_ocs2::BASE_STATE_DIM + i) = arm_qd_[i];          // velocity
+      }
     }
   }
 
@@ -155,21 +165,28 @@ class HyummBridgeNode : public rclcpp::Node {
     // (else a frozen velocity with a still-advancing setpoint would fight).
     const bool use_int = collision_stop_ || desired_position_source_ == "integrate";
 
+    // 2nd-order MPC: desired state xd = [pos(9); vel(9)], input ud = accel(9).
+    // Send position, velocity AND acceleration so the RT side can quintic-
+    // interpolate 100 Hz -> 1 kHz with smooth boundary conditions.
     packet::RobotInfo<MM_DOF> pkt{};   // {} zero-inits all sub-structs
     for (int i = 0; i < MM_DOF; ++i) {
       const bool isBase = (i < static_cast<int>(hyumm_ocs2::BASE_INPUT_DIM));
-      double vel = ud(i);
-      const double lim = isBase ? max_base_vel_ : max_arm_vel_;
-      vel = std::max(-lim, std::min(lim, vel));   // safety clamp
-      if (isBase && !command_base_) vel = 0.0;
-      vel *= rate_;                               // phase-clock gate (1.0 unless stopping)
+      double vel = xd(hyumm_ocs2::VEL_OFFSET + i);  // desired velocity (state)
+      double acc = ud(i);                           // desired acceleration (input)
+      const double vlim = isBase ? max_base_vel_ : max_arm_vel_;
+      const double alim = isBase ? max_base_acc_ : max_arm_acc_;
+      vel = std::max(-vlim, std::min(vlim, vel));   // safety clamps
+      acc = std::max(-alim, std::min(alim, acc));
+      if (isBase && !command_base_) { vel = 0.0; acc = 0.0; }
+      vel *= rate_;                                 // phase-clock gate (1.0 unless stopping)
+      acc *= rate_;
 
       double pos;
       if (use_int) { des_pos_int_[i] += vel * dt; pos = des_pos_int_[i]; }
-      else { pos = xd(i); }
+      else { pos = xd(i); }                         // desired position (state)
       pkt.des.jointState.position[i] = pos;
       pkt.des.jointState.velocity[i] = vel;
-      pkt.des.jointState.accel[i] = 0.0;   // OCS2 outputs velocity; no accel reference
+      pkt.des.jointState.accel[i] = acc;
     }
     desired_link_.tryWrite(pkt);
   }
@@ -194,6 +211,24 @@ class HyummBridgeNode : public rclcpp::Node {
       prev_yaw_ = yaw;
     }
     base_yaw_ = acc_yaw_;
+
+    // Base velocity by finite difference of the pose (the PoseStamped carries no
+    // twist), lightly low-pass filtered. The 2nd-order MPC needs base velocity.
+    const double tnow = m->header.stamp.sec + m->header.stamp.nanosec * 1e-9;
+    if (pose_t_init_) {
+      const double ddt = tnow - prev_pose_t_;
+      if (ddt > 1e-4) {
+        const double a = vel_filter_alpha_;
+        base_vx_ = a * (m->pose.position.x - base_x_) / ddt + (1.0 - a) * base_vx_;
+        base_vy_ = a * (m->pose.position.y - base_y_) / ddt + (1.0 - a) * base_vy_;
+        base_vyaw_ = a * (base_yaw_ - prev_base_yaw_) / ddt + (1.0 - a) * base_vyaw_;
+      }
+    }
+    prev_pose_t_ = tnow;
+    prev_base_yaw_ = base_yaw_;
+    pose_t_init_ = true;
+    base_x_ = m->pose.position.x;
+    base_y_ = m->pose.position.y;
     have_base_ = true;
   }
 
@@ -203,6 +238,7 @@ class HyummBridgeNode : public rclcpp::Node {
       for (size_t j = 0; j < m->name.size(); ++j) {
         if (m->name[j] == arm_joint_names_[i] && j < m->position.size()) {
           arm_q_[i] = m->position[j];
+          if (j < m->velocity.size()) arm_qd_[i] = m->velocity[j];  // 0 if velocity not published
           ++found;
           break;
         }
@@ -223,6 +259,8 @@ class HyummBridgeNode : public rclcpp::Node {
   std::string desired_position_source_ = "state";
   bool command_base_ = true;
   double max_base_vel_ = 1.0, max_arm_vel_ = 2.0;
+  double max_base_acc_ = 5.0, max_arm_acc_ = 10.0;  // accel safety clamps (m/s^2, rad/s^2)
+  double vel_filter_alpha_ = 0.3;                   // base-velocity finite-diff low-pass
 
   // phase-clock collision-stop
   bool collision_stop_ = false;
@@ -233,10 +271,14 @@ class HyummBridgeNode : public rclcpp::Node {
 
   // measured state cache
   double base_x_ = 0.0, base_y_ = 0.0, base_yaw_ = 0.0;
-  std::vector<double> arm_q_;
+  double base_vx_ = 0.0, base_vy_ = 0.0, base_vyaw_ = 0.0;  // finite-diff base velocity
+  std::vector<double> arm_q_, arm_qd_;                       // arm position + velocity
   bool have_base_ = false, have_arm_ = false;
   bool yaw_init_ = false;
   double acc_yaw_ = 0.0, prev_yaw_ = 0.0;
+  // base-velocity finite-diff state
+  bool pose_t_init_ = false;
+  double prev_pose_t_ = 0.0, prev_base_yaw_ = 0.0;
   double des_pos_int_[MM_DOF] = {0};
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
