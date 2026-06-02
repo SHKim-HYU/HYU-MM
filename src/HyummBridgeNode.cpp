@@ -35,6 +35,7 @@
 #include "hyumm_ocs2/HyummInterface.h"
 #include "hyumm_ocs2/definitions.h"
 #include "hyumm_ocs2/package_path.h"
+#include "hyumm_ocs2/reference/CsvTargetLoader.h"
 #include "hyumm_bridge/CollisionMonitor.h"
 #include "xddp_ros.h"   // XddpLink (self-healing /dev/rtpN) + packet:: schema (from hyumm_nrt)
 
@@ -80,6 +81,15 @@ class HyummBridgeNode : public rclcpp::Node {
     max_arm_acc_ = declare_parameter<double>("max_arm_acc", 10.0);    // rad/s^2
     vel_filter_alpha_ = declare_parameter<double>("vel_filter_alpha", 0.3);
 
+    // --- Online-planning handshake (RT <-> OCS2) + front/back trajectories ---
+    // RT requests planning (START_FRONT/START_BACK) over a dedicated XDDP RX port;
+    // OCS2 streams setpoints and reports status (RUNNING/FAULT/DONE) in the desired
+    // packet. The base CSVs are loaded in main(); OCS2 plans each from its row 0.
+    csv_front_ = declare_parameter<std::string>("csv_front", "");
+    csv_back_ = declare_parameter<std::string>("csv_back", "");
+    cmd_port_ = declare_parameter<int>("xddp_cmd_port", 6);  // RT -> NRT MpcHandshake
+    rt_task_cmd_ = declare_parameter<std::string>("rt_task_cmd", "tx_mpc_cmd_task");
+
     // --- Phase-clock collision-stop ---
     // When enabled, a binary self-collision monitor (built in main) gates the
     // emitted desired velocity by a rate in [0,1]: rate ramps to 0 on a current/
@@ -104,9 +114,13 @@ class HyummBridgeNode : public rclcpp::Node {
     desired_link_.configure("des", desired_port_, rt_task_desired_, send_desired_);
     desired_link_.setLogger(get_logger());
     desired_link_.poll();
+    // Command RX (RT -> NRT). Always "enabled" so it reads when the RT task is up.
+    cmd_link_.configure("mpc_cmd", cmd_port_, rt_task_cmd_, true);
+    cmd_link_.setLogger(get_logger());
+    cmd_link_.poll();
     watchdog_ = create_wall_timer(
         std::chrono::duration<double>(watchdog_period_),
-        [this]() { desired_link_.poll(); });
+        [this]() { desired_link_.poll(); cmd_link_.poll(); });
 
     RCLCPP_INFO(get_logger(),
         "hyumm_bridge: base<-%s arm<-%s ; send_desired=%s (port /dev/rtp%d task '%s')",
@@ -188,8 +202,42 @@ class HyummBridgeNode : public rclcpp::Node {
       pkt.des.jointState.velocity[i] = vel;
       pkt.des.jointState.accel[i] = acc;
     }
+    pkt.mpc.status = mpc_status_;
+    pkt.mpc.fault = mpc_fault_;
+    pkt.mpc.seq = ++mpc_seq_;
     desired_link_.tryWrite(pkt);
   }
+
+  // Emit a hold packet (no motion, current status) -- used while IDLE/DONE/FAULT so
+  // the RT side keeps seeing the handshake status (and a fresh seq) without motion.
+  void sendHold(const ocs2::vector_t& measured) {
+    if (!send_desired_) return;
+    packet::RobotInfo<MM_DOF> pkt{};
+    for (int i = 0; i < MM_DOF; ++i) {
+      pkt.des.jointState.position[i] = i < measured.size() ? measured(i) : 0.0;
+      pkt.des.jointState.velocity[i] = 0.0;
+      pkt.des.jointState.accel[i] = 0.0;
+    }
+    pkt.mpc.status = mpc_status_;
+    pkt.mpc.fault = mpc_fault_;
+    pkt.mpc.seq = ++mpc_seq_;
+    desired_link_.tryWrite(pkt);
+  }
+
+  // Read the latest RT command (drains to the most recent). Returns MPC_CMD_NONE if
+  // nothing new arrived this cycle.
+  uint8_t tryReadCmd() {
+    packet::MpcHandshake hs{};
+    uint8_t cmd = packet::MPC_CMD_NONE;
+    while (cmd_link_.tryRead(hs)) cmd = hs.cmd;  // drain to latest
+    return cmd;
+  }
+  void setMpcStatus(uint8_t status, uint16_t fault = packet::MPC_FAULT_NONE) {
+    mpc_status_ = status;
+    mpc_fault_ = fault;
+  }
+  const std::string& csvFront() const { return csv_front_; }
+  const std::string& csvBack() const { return csv_back_; }
 
  private:
   void poseCb(geometry_msgs::msg::PoseStamped::ConstSharedPtr m) {
@@ -255,6 +303,12 @@ class HyummBridgeNode : public rclcpp::Node {
   bool send_desired_ = false;
   int desired_port_ = 2;
   std::string rt_task_desired_;
+  // handshake / front-back trajectories
+  std::string csv_front_, csv_back_, rt_task_cmd_;
+  int cmd_port_ = 6;
+  uint8_t mpc_status_ = 0;   // packet::MpcStatus, sent in the desired packet
+  uint16_t mpc_fault_ = 0;   // packet::MpcFault
+  uint32_t mpc_seq_ = 0;     // setpoint sequence (liveness)
   double watchdog_period_ = 0.5;
   std::string desired_position_source_ = "state";
   bool command_base_ = true;
@@ -285,6 +339,7 @@ class HyummBridgeNode : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
   rclcpp::TimerBase::SharedPtr watchdog_;
   XddpLink desired_link_;
+  XddpLink cmd_link_;   // RT -> NRT MpcHandshake command
 };
 
 int main(int argc, char** argv) {
@@ -339,69 +394,100 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Pre-load the front/back reference trajectories (each planned from its row 0).
+  hyumm_ocs2::CsvTargetLoader loader;
+  ocs2::TargetTrajectories front_ref, back_ref;
+  bool have_front = false, have_back = false;
+  try {
+    if (!node->csvFront().empty()) { front_ref = loader.loadFromCsv(node->csvFront()); have_front = true; }
+  } catch (const std::exception& e) { RCLCPP_ERROR(node->get_logger(), "front CSV: %s", e.what()); }
+  try {
+    if (!node->csvBack().empty()) { back_ref = loader.loadFromCsv(node->csvBack()); have_back = true; }
+  } catch (const std::exception& e) { RCLCPP_ERROR(node->get_logger(), "back CSV: %s", e.what()); }
+  RCLCPP_INFO(node->get_logger(), "trajectories: front=%s back=%s",
+              have_front ? "loaded" : "none", have_back ? "loaded" : "none");
+
+  // Handshake state machine.
+  enum class St { IDLE, RUNNING, DONE, FAULT };
+  St state = St::IDLE;
+  node->setMpcStatus(packet::MPC_STAT_IDLE);
+  double traj_end = 0.0;
+  std::string seg = "-";
+
   const double dt = 1.0 / node->loopRateHz();
   rclcpp::Rate rate(node->loopRateHz());
   double t = 0.0;
-  bool warned_wait = false;
-  bool got_policy = false;
 
-  RCLCPP_INFO(node->get_logger(), "HYUMM bridge (real MRT loop) starting at %.0f Hz", node->loopRateHz());
+  RCLCPP_INFO(node->get_logger(), "HYUMM bridge starting at %.0f Hz -- IDLE, waiting for RT START",
+              node->loopRateHz());
   while (rclcpp::ok()) {
     mrt.spinMRT();   // services MPC policy callback AND our pose/joint_states/watchdog
 
-    // 1) assemble the MEASURED 9-D observation
-    obs.time = t;
-    node->fillMeasuredState(obs.state);
-
-    // 2) feedback to MPC
-    mrt.setCurrentObservation(obs);
-
-    // 3) swap in the latest policy
-    mrt.updatePolicy();
-
-    // 4) if a plan exists, compute desired joints AT THE MEASURED STATE and emit
-    if (mrt.initialPolicyReceived()) {
-      if (!got_policy) {
-        RCLCPP_INFO(node->get_logger(),
-                    "first MPC policy received -- closed-loop running");
-        got_policy = true;
-      }
-      ocs2::vector_t xd, ud;
-      size_t mode = 0;
-      mrt.evaluatePolicy(t, obs.state, xd, ud, mode);
-
-      // Phase-clock collision-stop: hazard = current OR imminent (planned) collision.
-      bool hazard = false;
-      double min_dist = 0.0;
-      if (monitor) {
-        min_dist = monitor->minDistance(obs.state);
-        hazard = min_dist < monitor->getMinimumDistance();
-        if (!hazard) {  // predictive lookahead over the planned state trajectory
-          const auto& sol = mrt.getPolicy();
-          const int N = std::min<int>(node->collisionLookahead(),
-                                      static_cast<int>(sol.stateTrajectory_.size()));
-          for (int k = 0; k < N; ++k) {
-            if (monitor->isInCollision(sol.stateTrajectory_[k])) { hazard = true; break; }
-          }
-        }
-      }
-      node->updatePhaseClock(hazard);
-
-      node->sendDesired(xd, ud, dt);
-      obs.input = ud;   // report the applied input back to MPC next cycle
-      // periodic heartbeat: measured base + desired base/arm velocity + phase clock
-      RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000,
-          "meas base[%.3f %.3f %.3f] meas?=%d/%d  des dq0=%.2f  rate=%.2f%s minDist=%.3f",
-          obs.state(0), obs.state(1), obs.state(2),
-          node->haveBase(), node->haveArm(), ud(3),
-          node->rate(), hazard ? " HAZARD" : "", min_dist);
-    } else if (!warned_wait) {
-      RCLCPP_WARN(node->get_logger(),
-                  "waiting for first MPC policy (is hyumm_mpc_node running?)");
-      warned_wait = true;
+    // --- handle RT command (start front/back, stop) ---
+    const uint8_t cmd = node->tryReadCmd();
+    if (cmd == packet::MPC_CMD_START_FRONT && state != St::RUNNING && have_front) {
+      mrt.resetMpcNode(front_ref); t = 0.0; traj_end = front_ref.timeTrajectory.back();
+      state = St::RUNNING; seg = "front"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
+      RCLCPP_INFO(node->get_logger(), "START_FRONT -> RUNNING (0..%.1fs)", traj_end);
+    } else if (cmd == packet::MPC_CMD_START_BACK && state != St::RUNNING && have_back) {
+      mrt.resetMpcNode(back_ref); t = 0.0; traj_end = back_ref.timeTrajectory.back();
+      state = St::RUNNING; seg = "back"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
+      RCLCPP_INFO(node->get_logger(), "START_BACK -> RUNNING (0..%.1fs)", traj_end);
+    } else if (cmd == packet::MPC_CMD_STOP) {
+      state = St::IDLE; seg = "-"; node->setMpcStatus(packet::MPC_STAT_IDLE);
+      RCLCPP_INFO(node->get_logger(), "STOP -> IDLE");
     }
 
-    t += dt;
+    // --- measured observation -> MPC ---
+    obs.time = t;
+    node->fillMeasuredState(obs.state);
+    mrt.setCurrentObservation(obs);
+    mrt.updatePolicy();
+
+    if (state == St::RUNNING) {
+      if (mrt.initialPolicyReceived()) {
+        ocs2::vector_t xd, ud;
+        size_t mode = 0;
+        mrt.evaluatePolicy(t, obs.state, xd, ud, mode);
+
+        // collision -> FAULT (RT decides: hold / servo-off). Off unless enabled.
+        bool hazard = false;
+        if (monitor) {
+          hazard = monitor->minDistance(obs.state) < monitor->getMinimumDistance();
+          if (!hazard) {
+            const auto& sol = mrt.getPolicy();
+            const int N = std::min<int>(node->collisionLookahead(),
+                                        static_cast<int>(sol.stateTrajectory_.size()));
+            for (int k = 0; k < N; ++k)
+              if (monitor->isInCollision(sol.stateTrajectory_[k])) { hazard = true; break; }
+          }
+        }
+        if (hazard) {
+          state = St::FAULT;
+          node->setMpcStatus(packet::MPC_STAT_FAULT, packet::MPC_FAULT_COLLISION);
+          RCLCPP_WARN(node->get_logger(), "COLLISION -> FAULT");
+        } else {
+          node->sendDesired(xd, ud, dt);    // status RUNNING written in the packet
+          obs.input = ud;
+          if (t >= traj_end) {
+            state = St::DONE;
+            node->setMpcStatus(packet::MPC_STAT_DONE);
+            RCLCPP_INFO(node->get_logger(), "%s trajectory DONE", seg.c_str());
+          } else {
+            t += dt;
+          }
+          RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000,
+              "[%s] t=%.1f/%.1f meas base[%.3f %.3f %.3f] des ddq0=%.2f",
+              seg.c_str(), t, traj_end, obs.state(0), obs.state(1), obs.state(2), ud(hyumm_ocs2::BASE_INPUT_DIM));
+        }
+      } else {
+        node->sendHold(obs.state);  // waiting for first policy
+      }
+    } else {
+      // IDLE / DONE / FAULT: no motion, just report status (+ fresh seq) to RT.
+      node->sendHold(obs.state);
+    }
+
     rate.sleep();
   }
 
