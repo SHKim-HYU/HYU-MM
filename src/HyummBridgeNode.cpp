@@ -28,10 +28,13 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include <ocs2_core/Types.h>
 #include <ocs2_mpc/SystemObservation.h>
 #include <ocs2_ros_interfaces/mrt/MRT_ROS_Interface.h>
+#include <ocs2_ros_interfaces/common/RosMsgConversions.h>
+#include <ocs2_msgs/msg/mpc_target_trajectories.hpp>
 
 #include "hyumm_ocs2/HyummInterface.h"
 #include "hyumm_ocs2/definitions.h"
@@ -51,6 +54,12 @@ class HyummBridgeNode : public rclcpp::Node {
     task_file_ = declare_parameter<std::string>("taskFile", pkg + "/config/task.info");
     urdf_file_ = declare_parameter<std::string>("urdfFile", pkg + "/urdf/hyumm_scan.urdf");
     lib_folder_ = declare_parameter<std::string>("libFolder", "/tmp/hyumm_ocs2");
+    // hyumm_bridge.yaml ships taskFile/urdfFile EMPTY ("default to the package path
+    // if empty"); a params-file empty string overrides the declare default, so honor
+    // that intent here instead of crashing the info_parser on an empty path.
+    if (task_file_.empty()) task_file_ = pkg + "/config/task.info";
+    if (urdf_file_.empty()) urdf_file_ = pkg + "/urdf/hyumm_scan.urdf";
+    if (lib_folder_.empty()) lib_folder_ = "/tmp/hyumm_ocs2";
 
     base_pose_topic_ = declare_parameter<std::string>(
         "base_pose_topic", "/vive_world/base_link/pose");
@@ -281,15 +290,32 @@ class HyummBridgeNode : public rclcpp::Node {
     for (size_t i = 0; i < hyumm_ocs2::BASE_STATE_DIM && i < loopback_err_.size(); ++i)
       loopback_state_(i) += loopback_err_[i];
   }
-  // Forward-integrate the loopback robot (double integrator) from the MPC's
-  // commanded acceleration -- like the real plant, NOT perfect position tracking
-  // (which would re-inject the slip each cycle and demand huge velocities). The
-  // initial base offset (seedLoopback) is the slip the whole-body MPC recovers.
-  void updateLoopback(const ocs2::vector_t& ud, double dt) {
+  // Loopback "plant" = PERFECT TRACKING of the MPC's commanded plan (the desired
+  // state xd the bridge sends to RT), with the configured base slip re-applied as a
+  // CONSTANT offset. This mirrors exactly what is sent to RT (RViz shows the commanded
+  // CSV tracking) and is unconditionally stable. The previous open-loop double-
+  // integration of the accel had NO damping and integrated the RAW (unclamped) accel,
+  // so the MPC cold-start transient (~73 rad/s^2 at t=0) became runaway drift
+  // (base to 15 m) -- in BOTH single-rate and bilevel. With slip=0 the robot follows
+  // the reference exactly; with slip!=0 the base shows the persistent offset and the
+  // whole-body MPC bends the arm (EE constraint) to hold the TCP -> slip-comp demo.
+  void updateLoopback(const ocs2::vector_t& xd, double /*dt*/) {
     if (loopback_state_.size() != static_cast<long>(hyumm_ocs2::STATE_DIM)) return;
-    loopback_state_.tail(hyumm_ocs2::POS_DIM) += ud * dt;                              // accel -> vel
-    loopback_state_.head(hyumm_ocs2::POS_DIM) += loopback_state_.tail(hyumm_ocs2::POS_DIM) * dt;  // vel -> pos
+    loopback_state_ = xd;  // arm (and base, unless decoupled) executes the commanded plan
+    // DECOUPLED: the base is EXOGENOUS -- it follows the CSV trajectory, not the MPC
+    // (which plans only the arm). Override the base pos+vel with the CSV base so RViz
+    // shows the smooth CSV base instead of an MPC-commanded (wobbly) one.
+    if (decoupled_ && exo_valid_) {
+      loopback_state_.head(hyumm_ocs2::BASE_STATE_DIM) = exo_base_.head(hyumm_ocs2::BASE_STATE_DIM);
+      loopback_state_.segment(hyumm_ocs2::VEL_OFFSET, hyumm_ocs2::BASE_STATE_DIM) =
+          exo_base_.tail(hyumm_ocs2::BASE_STATE_DIM);
+    }
+    for (size_t i = 0; i < hyumm_ocs2::BASE_STATE_DIM && i < loopback_err_.size(); ++i)
+      loopback_state_(i) += loopback_err_[i];   // persistent base slip the arm compensates
   }
+  // Decoupled mode: base is exogenous (CSV). setExoBase feeds the CSV base [pos(3);vel(3)].
+  void setDecoupled(bool d) { decoupled_ = d; }
+  void setExoBase(const ocs2::vector_t& e) { exo_base_ = e; exo_valid_ = true; }
   // Publish the EXACT XDDP-bound packet (clamped pos/vel + accel-in-effort) + status
   // to ROS, and /joint_states for RViz. So ~/desired mirrors what goes over XDDP.
   void publishPacket(const packet::RobotInfo<MM_DOF>& pkt) {
@@ -389,6 +415,9 @@ class HyummBridgeNode : public rclcpp::Node {
   std::vector<double> loopback_err_;
   uint8_t ros_cmd_ = 0;              // packet::MpcCmd from ~/mpc_cmd
   ocs2::vector_t loopback_state_;    // loopback measured state (prev desired + slip)
+  bool decoupled_ = false;           // base exogenous (controlBase=false): base<-CSV, arm<-MPC
+  ocs2::vector_t exo_base_;          // [base pos(3); base vel(3)] from the CSV (decoupled)
+  bool exo_valid_ = false;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr cmd_ros_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr desired_pub_, js_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr status_pub_;
@@ -438,6 +467,15 @@ int main(int argc, char** argv) {
   hyumm_ocs2::HyummInterface interface(
       node->taskFile(), node->urdfFile(), node->libFolder(), true);
 
+  // Decoupled (controlBase=false): the MPC plans only the arm; the base is exogenous and
+  // follows the CSV. In ros_debug we drive the loopback base from the CSV so RViz shows a
+  // smooth base (no MPC base wobble). Whole-body (true) keeps the base in the MPC plan.
+  const bool decoupled = !interface.controlsBase();
+  node->setDecoupled(decoupled);
+  RCLCPP_INFO(node->get_logger(), "base control: %s",
+              decoupled ? "DECOUPLED (base<-CSV exogenous, MPC plans arm only)"
+                        : "WHOLE-BODY (MPC commands base+arm)");
+
   ocs2::MRT_ROS_Interface mrt(robotName);
   mrt.initRollout(&interface.getRollout());
 
@@ -461,21 +499,26 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(node->get_logger(), "Resetting MPC (waiting for hyumm_mpc_node)...");
   mrt.resetMpcNode(initTarget);
 
-  // Binary self-collision monitor for the phase-clock (built from task.info
-  // collisionLinkPairs; independent of the SQP self-collision constraint).
-  std::unique_ptr<hyumm_bridge::CollisionMonitor> monitor;
-  if (node->collisionStopEnabled()) {
-    monitor = hyumm_bridge::CollisionMonitor::loadFromTaskFile(
-        node->taskFile(), interface.getPinocchioInterface());
-    if (monitor) {
-      RCLCPP_INFO(node->get_logger(),
-                  "collision-stop ENABLED: %zu pairs, min distance %.3f m",
-                  monitor->numCollisionPairs(), monitor->getMinimumDistance());
-    } else {
-      RCLCPP_WARN(node->get_logger(),
-                  "collision_stop set but no collisionLinkPairs in task.info -- disabled");
-    }
+  // Self-collision monitor (task.info collisionLinkPairs). ALWAYS built: it feeds both
+  // (a) the optional phase-clock collision-stop, and (b) the PREDICTIVE gate signal for
+  // the reshaper -- the min self-distance over the fast MPC's PREDICTED 1 s horizon.
+  std::unique_ptr<hyumm_bridge::CollisionMonitor> monitor =
+      hyumm_bridge::CollisionMonitor::loadFromTaskFile(
+          node->taskFile(), interface.getPinocchioInterface());
+  if (monitor) {
+    RCLCPP_INFO(node->get_logger(),
+                "self-collision monitor: %zu pairs, min-dist %.3f m%s",
+                monitor->numCollisionPairs(), monitor->getMinimumDistance(),
+                node->collisionStopEnabled() ? " (collision-stop ON)" : "");
+  } else {
+    RCLCPP_WARN(node->get_logger(),
+                "no collisionLinkPairs in task.info -- predictive gate disabled");
   }
+  // Predictive gate signal: min self-distance over the fast MPC's predicted horizon.
+  // The reshaper subscribes and engages when it drops below its margin -- BEFORE the
+  // collision, so avoidance is planned smoothly (no last-instant jerk).
+  auto collision_predict_pub =
+      node->create_publisher<std_msgs::msg::Float64>(robotName + "_collision_predict", 10);
 
   // Pre-load the front/back reference trajectories (each planned from its row 0).
   hyumm_ocs2::CsvTargetLoader loader;
@@ -490,16 +533,32 @@ int main(int argc, char** argv) {
   RCLCPP_INFO(node->get_logger(), "trajectories: front=%s back=%s",
               have_front ? "loaded" : "none", have_back ? "loaded" : "none");
 
+  // Raw-reference channel for the OPTIONAL slow self-collision reshaper
+  // (hyumm_reshaper_node). On each START we publish the active raw CSV reference
+  // here; the reshaper solves a self-collision MPC and republishes a collision-free
+  // reference on hyumm_mpc_target (which the fast MPC tracks instead of this raw one).
+  // Latched (transient_local) so a reshaper that connects after START still gets it.
+  // If no reshaper runs, this publish is inert and the fast MPC just tracks the raw
+  // reference the resetMpcNode() below already set -- unchanged behaviour.
+  auto raw_ref_pub = node->create_publisher<ocs2_msgs::msg::MpcTargetTrajectories>(
+      robotName + "_raw_mpc_target", rclcpp::QoS(1).transient_local());
+  auto publishRawRef = [&](const ocs2::TargetTrajectories& ref) {
+    raw_ref_pub->publish(ocs2::ros_msg_conversions::createTargetTrajectoriesMsg(ref));
+  };
+
   // Handshake state machine.
   enum class St { IDLE, RUNNING, DONE, FAULT };
   St state = St::IDLE;
   node->setMpcStatus(packet::MPC_STAT_IDLE);
   double traj_end = 0.0;
   std::string seg = "-";
+  const ocs2::TargetTrajectories* active_ref = nullptr;  // active CSV (for the exogenous base)
 
   const double dt = 1.0 / node->loopRateHz();
   rclcpp::Rate rate(node->loopRateHz());
   double t = 0.0;
+  size_t pred_cyc = 0;        // throttle the horizon collision scan to ~10 Hz
+  double pred_min = 1e9;      // latest predicted min self-distance over the plan
 
   RCLCPP_INFO(node->get_logger(), "HYUMM bridge starting at %.0f Hz -- IDLE, waiting for RT START",
               node->loopRateHz());
@@ -509,12 +568,14 @@ int main(int argc, char** argv) {
     // --- handle RT command (start front/back, stop) ---
     const uint8_t cmd = node->tryReadCmd();
     if (cmd == packet::MPC_CMD_START_FRONT && state != St::RUNNING && have_front) {
-      mrt.resetMpcNode(front_ref); t = 0.0; traj_end = front_ref.timeTrajectory.back();
+      mrt.resetMpcNode(front_ref); publishRawRef(front_ref); active_ref = &front_ref;
+      t = 0.0; traj_end = front_ref.timeTrajectory.back();
       state = St::RUNNING; seg = "front"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
       if (node->rosDebug()) node->seedLoopback(front_ref);
       RCLCPP_INFO(node->get_logger(), "START_FRONT -> RUNNING (0..%.1fs)", traj_end);
     } else if (cmd == packet::MPC_CMD_START_BACK && state != St::RUNNING && have_back) {
-      mrt.resetMpcNode(back_ref); t = 0.0; traj_end = back_ref.timeTrajectory.back();
+      mrt.resetMpcNode(back_ref); publishRawRef(back_ref); active_ref = &back_ref;
+      t = 0.0; traj_end = back_ref.timeTrajectory.back();
       state = St::RUNNING; seg = "back"; node->setMpcStatus(packet::MPC_STAT_RUNNING);
       if (node->rosDebug()) node->seedLoopback(back_ref);
       RCLCPP_INFO(node->get_logger(), "START_BACK -> RUNNING (0..%.1fs)", traj_end);
@@ -535,25 +596,46 @@ int main(int argc, char** argv) {
         size_t mode = 0;
         mrt.evaluatePolicy(t, obs.state, xd, ud, mode);
 
-        // collision -> FAULT (RT decides: hold / servo-off). Off unless enabled.
-        bool hazard = false;
-        if (monitor) {
-          hazard = monitor->minDistance(obs.state) < monitor->getMinimumDistance();
-          if (!hazard) {
-            const auto& sol = mrt.getPolicy();
-            const int N = std::min<int>(node->collisionLookahead(),
-                                        static_cast<int>(sol.stateTrajectory_.size()));
-            for (int k = 0; k < N; ++k)
-              if (monitor->isInCollision(sol.stateTrajectory_[k])) { hazard = true; break; }
-          }
+        // PREDICTIVE collision signal: min self-distance over the fast MPC's predicted
+        // plan (1 s horizon, ~20 subsamples), throttled to ~10 Hz. Published for the
+        // reshaper's gate (engage when a collision appears ANYWHERE in the horizon, not
+        // just at the current instant) and reused for the optional collision-stop.
+        if (monitor && (pred_cyc++ % 10 == 0)) {
+          double pmin = monitor->minDistance(obs.state);
+          const auto& sol = mrt.getPolicy();
+          const int M = static_cast<int>(sol.stateTrajectory_.size());
+          const int step = std::max(1, M / 20);
+          for (int k = 0; k < M; k += step)
+            pmin = std::min(pmin, monitor->minDistance(sol.stateTrajectory_[k]));
+          pred_min = pmin;
+          std_msgs::msg::Float64 cm; cm.data = pred_min;
+          collision_predict_pub->publish(cm);
         }
+        // collision-stop FAULT (only when enabled): predicted min-dist below the hard limit.
+        const bool hazard = node->collisionStopEnabled() && monitor &&
+                            (pred_min < monitor->getMinimumDistance());
         if (hazard) {
           state = St::FAULT;
           node->setMpcStatus(packet::MPC_STAT_FAULT, packet::MPC_FAULT_COLLISION);
           RCLCPP_WARN(node->get_logger(), "COLLISION -> FAULT");
         } else {
           node->sendDesired(xd, ud, dt);    // status RUNNING in the packet; publishes ~/desired
-          if (node->rosDebug()) node->updateLoopback(ud, dt);  // forward-integrate loopback robot
+          if (node->rosDebug()) {
+            // Decoupled: feed the exogenous base [pos(3);vel(3)] from the CSV at t so the
+            // loopback base follows the CSV (smooth), not the MPC. (Whole-body: base<-xd.)
+            if (decoupled && active_ref != nullptr) {
+              const ocs2::vector_t r1 = active_ref->getDesiredState(t);
+              const ocs2::vector_t r2 = active_ref->getDesiredState(t + dt);
+              ocs2::vector_t exo(2 * hyumm_ocs2::BASE_STATE_DIM);
+              exo.head(hyumm_ocs2::BASE_STATE_DIM) =
+                  r1.tail(hyumm_ocs2::POS_DIM).head(hyumm_ocs2::BASE_STATE_DIM);
+              exo.tail(hyumm_ocs2::BASE_STATE_DIM) =
+                  (r2.tail(hyumm_ocs2::POS_DIM).head(hyumm_ocs2::BASE_STATE_DIM) -
+                   exo.head(hyumm_ocs2::BASE_STATE_DIM)) / dt;
+              node->setExoBase(exo);
+            }
+            node->updateLoopback(xd, dt);  // perfect-tracking loopback (+ slip; base<-CSV if decoupled)
+          }
           obs.input = ud;
           if (t >= traj_end) {
             state = St::DONE;

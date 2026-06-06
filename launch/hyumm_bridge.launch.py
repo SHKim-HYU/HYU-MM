@@ -24,9 +24,15 @@ def generate_launch_description():
     pkg = get_package_share_directory('hyumm_bridge')
     default_config = os.path.join(pkg, 'config', 'hyumm_bridge.yaml')
 
-    rtecat_cfg = '/home/robot/robot_ws/RTECAT_MobileManipulator/config'
-    default_front = os.path.join(rtecat_cfg, 'trajectory_Christofides_LG_front_combined_10Hz.csv')
-    default_back = os.path.join(rtecat_cfg, 'trajectory_Christofides_LG_back_combined_10Hz.csv')
+    # Front/back scan trajectories = the re-planned CSVs from hyumm_scan_moveit_config
+    # (data/front, data/back), Christofides_LG variant. Same source the RViz playback uses,
+    # so the bridge and the visualization stay in sync. Override csv_front/csv_back to switch.
+    moveit_data = os.path.join(
+        get_package_share_directory('hyumm_scan_moveit_config'), 'data')
+    default_front = os.path.join(
+        moveit_data, 'front', 'trajectory_Christofides_LG_front_combined_10Hz.csv')
+    default_back = os.path.join(
+        moveit_data, 'back', 'trajectory_Christofides_LG_back_combined_10Hz.csv')
 
     return LaunchDescription([
         DeclareLaunchArgument('config', default_value=default_config),

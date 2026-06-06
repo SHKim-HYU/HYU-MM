@@ -32,4 +32,5 @@
   <export>
     <build_type>ament_cmake</build_type>
   </export>
+  <exec_depend>hyumm_scan_moveit_config</exec_depend>
 </package>
