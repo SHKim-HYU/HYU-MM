@@ -17,7 +17,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -43,26 +43,38 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='false'),
         DeclareLaunchArgument('teleop', default_value='false'),
 
+        # Each include is wrapped in a scoped GroupAction so the launch args they
+        # declare stay LOCAL. vive_compat.launch.py and vive_xddp.launch.py BOTH declare
+        # a 'config' arg; without scoping, vive_compat's config=vive_compat.yaml leaks
+        # into vive_xddp (includes share the parent scope by default), and vive_xddp_node
+        # then tries to load vive_compat.yaml as its --params-file and aborts.
+
         # 1) libsurvive backend -> /vive/* topics
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(vive_lib, 'launch', 'vive_compat.launch.py')),
-            condition=IfCondition(backend),
-        ),
+        GroupAction(scoped=True, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(vive_lib, 'launch', 'vive_compat.launch.py')),
+                condition=IfCondition(backend),
+            ),
+        ]),
 
         # 2) nrt low-level node: localize -> TF + XDDP (odom + cmd_vel + rt nominal status)
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(nrt, 'launch', 'vive_xddp.launch.py')),
-            launch_arguments={'send_xddp': xddp, 'recv_status': robot}.items(),
-        ),
+        GroupAction(scoped=True, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(nrt, 'launch', 'vive_xddp.launch.py')),
+                launch_arguments={'send_xddp': xddp, 'recv_status': robot}.items(),
+            ),
+        ]),
 
         # 3) actual (vive) + nominal (rt, green) robot models
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(desc, 'launch', 'robot_display.launch.py')),
-            condition=IfCondition(robot),
-        ),
+        GroupAction(scoped=True, actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(desc, 'launch', 'robot_display.launch.py')),
+                condition=IfCondition(robot),
+            ),
+        ]),
 
         # 4) teleop -> /cmd_vel (forwarded to RT by the nrt node)
         Node(

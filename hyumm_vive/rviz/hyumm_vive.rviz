@@ -1,19 +1,19 @@
 Panels:
-  - Class: rviz/Displays
+  - Class: rviz_common/Displays
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /TF1
         - /TF1/Frames1
       Splitter Ratio: 0.5
-  - Class: rviz/Views
+  - Class: rviz_common/Views
     Name: Views
 Visualization Manager:
   Class: ""
   Displays:
     - Alpha: 0.5
       Cell Size: 1
-      Class: rviz/Grid
+      Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
       Name: Grid
       Normal Cell Count: 0
@@ -21,7 +21,7 @@ Visualization Manager:
       Plane Cell Count: 20
       Reference Frame: vive_world
       Value: true
-    - Class: rviz/TF
+    - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
       Frames:
@@ -35,7 +35,7 @@ Visualization Manager:
         {}
       Update Interval: 0
       Value: true
-    - Class: rviz/Axes
+    - Class: rviz_default_plugins/Axes
       Enabled: true
       Length: 0.5
       Name: vive_world (origin)
@@ -43,8 +43,15 @@ Visualization Manager:
       Reference Frame: vive_world
       Value: true
     - Alpha: 1
-      Class: rviz/RobotModel
+      Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -53,14 +60,20 @@ Visualization Manager:
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
       Name: Actual (vive)
-      Robot Description: robot_description
       TF Prefix: ""
       Update Interval: 0
       Value: true
       Visual Enabled: true
     - Alpha: 0.3
-      Class: rviz/RobotModel
+      Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /nominal/robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -69,8 +82,7 @@ Visualization Manager:
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
       Name: Nominal (rt, green)
-      Robot Description: nominal/robot_description
-      TF Prefix: ""
+      TF Prefix: nominal
       Update Interval: 0
       Value: true
       Visual Enabled: true
@@ -81,14 +93,14 @@ Visualization Manager:
     Frame Rate: 30
   Name: root
   Tools:
-    - Class: rviz/MoveCamera
-    - Class: rviz/Select
-    - Class: rviz/FocusCamera
-    - Class: rviz/Measure
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
   Value: true
   Views:
     Current:
-      Class: rviz/Orbit
+      Class: rviz_default_plugins/Orbit
       Distance: 8
       Focal Point:
         X: 1.5
