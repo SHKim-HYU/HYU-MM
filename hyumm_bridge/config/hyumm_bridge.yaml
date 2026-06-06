@@ -1,0 +1,33 @@
+# hyumm_bridge: real MRT loop (vive + /joint_states -> OCS2 -> desired joints -> XDDP)
+/**:
+  ros__parameters:
+    # OCS2 problem (default to hyumm_ocs2 share paths inside the node if empty)
+    taskFile: ""
+    urdfFile: ""
+    libFolder: /tmp/hyumm_ocs2
+
+    # measured-state inputs (published by hyumm_nrt's hyumm_vive_xddp_node)
+    base_pose_topic: /vive_world/base_link/pose
+    joint_states_topic: /joint_states
+    arm_joint_names: [joint0, joint1, joint2, joint3, joint4, joint5]
+    loop_rate_hz: 100.0
+
+    # --- XDDP desired-joint channel (NRT -> RT) ---
+    # SAFETY: false = nothing is written to RT. Confirm the RT contract below
+    # (RTECAT_MobileManipulator is external to this workspace) before enabling.
+    send_desired: false
+    xddp_desired_port: 2              # XDDP_PORT_CMD_INFO_3 -> /dev/rtp2  (CONFIRM with RT)
+    rt_task_desired: rx_desired_joints_task   # thread name grepped in /proc/xenomai/sched/threads (CONFIRM)
+    watchdog_period: 0.5
+    desired_position_source: state    # "state" (plan xd) | "integrate" (integral of ud)
+    command_base: true               # also send base velocity des[0..2]; false = arm-only
+
+    # safety clamps on emitted velocity command (per-DOF magnitude)
+    max_base_vel: 1.0                # m/s, rad/s
+    max_arm_vel: 2.0                 # rad/s
+
+    # --- phase-clock collision-stop (binary self-collision monitor) ---
+    collision_stop: false            # true: gate desired velocity by a [0,1] rate on (imminent) self-collision
+    collision_lookahead: 10          # planned-trajectory nodes scanned for imminent collision
+    rate_ramp_up: 0.02               # per-cycle resume ramp (slow)
+    rate_ramp_down: 0.20             # per-cycle stop ramp (fast)
