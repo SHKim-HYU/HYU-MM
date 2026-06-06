@@ -15,7 +15,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 
@@ -24,22 +24,27 @@ def generate_launch_description():
     pkg = get_package_share_directory('hyumm_bridge')
     default_config = os.path.join(pkg, 'config', 'hyumm_bridge.yaml')
 
-    # Front/back scan trajectories = the re-planned CSVs from hyumm_scan_moveit_config
-    # (data/front, data/back), Christofides_LG variant. Same source the RViz playback uses,
-    # so the bridge and the visualization stay in sync. Override csv_front/csv_back to switch.
-    moveit_data = os.path.join(
+    # Front/back scan CSVs live in hyumm_scan_moveit_config/share/data/{front,back} as
+    # trajectory_<variant>_<front|back>_combined_10Hz.csv. Select with variant:=<algo>
+    # (TR_TSP | TR_TSP_LG | Christofides_LG | TwoOpt_LG); defaults to TR_TSP to match the
+    # RT controller's WITH_TR_TSP build. csv_front/csv_back still override the full path.
+    data = os.path.join(
         get_package_share_directory('hyumm_scan_moveit_config'), 'data')
-    default_front = os.path.join(
-        moveit_data, 'front', 'trajectory_Christofides_LG_front_combined_10Hz.csv')
-    default_back = os.path.join(
-        moveit_data, 'back', 'trajectory_Christofides_LG_back_combined_10Hz.csv')
+    variant = LaunchConfiguration('variant')
+    front_default = [TextSubstitution(text=os.path.join(data, 'front', 'trajectory_')),
+                     variant, TextSubstitution(text='_front_combined_10Hz.csv')]
+    back_default = [TextSubstitution(text=os.path.join(data, 'back', 'trajectory_')),
+                    variant, TextSubstitution(text='_back_combined_10Hz.csv')]
 
     return LaunchDescription([
         DeclareLaunchArgument('config', default_value=default_config),
         DeclareLaunchArgument('send_desired', default_value='false'),
-        # Front/back scan trajectories the MPC plans on the RT's START_FRONT/START_BACK.
-        DeclareLaunchArgument('csv_front', default_value=default_front),
-        DeclareLaunchArgument('csv_back', default_value=default_back),
+        # Scan trajectory algorithm variant = the middle token of the CSV filename.
+        DeclareLaunchArgument('variant', default_value='TR_TSP'),
+        # Front/back scan trajectories the MPC plans on the RT's START_FRONT/START_BACK;
+        # default to the <variant> CSVs, override either for a fully custom path.
+        DeclareLaunchArgument('csv_front', default_value=front_default),
+        DeclareLaunchArgument('csv_back', default_value=back_default),
         # Handshake: RT->NRT command port (must match RTECAT XDDP_PORT_MPC_CMD).
         DeclareLaunchArgument('xddp_cmd_port', default_value='6'),
         # ROS2 verification (no Xenomai/XDDP): mirror XDDP to ROS topics + loopback.
